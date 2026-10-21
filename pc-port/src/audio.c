@@ -2,13 +2,29 @@
 // Native audio output with per-channel conversion and real-time buffer pacing.
 #include "runtime.h"
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 typedef struct {int active,channels,frames,floating,standard;int32_t volume[8];SDL_AudioStream *stream;uint64_t next;} Port;
 typedef struct {int32_t handle;const void *data;} Output;
 static SRWLOCK lock=SRWLOCK_INIT;
 static Port ports[25];static int initialized;
 static int32_t err(unsigned n){return (int32_t)(UINT32_C(0x80260000)|n);}
+// ISS_VOLUME (launcher Volume, percent, 50 to 200, 100 = the game's own level): a gain on every
+// output port. Above full scale the peaks go through a soft knee instead of clipping hard.
+static float master_gain(void){
+    static float gain=-1;
+    if(gain<0){const char *v=getenv("ISS_VOLUME");const long percent=v?strtol(v,NULL,10):100;
+        gain=(float)(percent<50?50:percent>200?200:percent)/100.0f;if(gain!=1.0f)fprintf(stderr,"AUDIO volume=%.0f%%\n",gain*100.0);}
+    return gain;
+}
+static float limit(float x){
+    const float knee=0.8f,a=fabsf(x);
+    if(a<=knee)return x;
+    const float y=knee+(1.0f-knee)*tanhf((a-knee)/(1.0f-knee));
+    return x<0?-y:y;
+}
 static int32_t GUEST_ABI init(void){
     if(initialized)return err(14);if(!SDL_InitSubSystem(SDL_INIT_AUDIO)){fprintf(stderr,"Audio init: %s\n",SDL_GetError());return err(15);}initialized=1;return 0;
 }
@@ -29,10 +45,10 @@ static int32_t output_one(int handle,const void *data,int pace){
     uint64_t period=(uint64_t)p->frames*1000000000/48000,now=SDL_GetTicksNS();
     if(!p->next||now>p->next+8*period)p->next=now;
     uint64_t deadline=p->next;p->next+=period;
-    float converted[2048*8];static const int remap[]={0,1,2,3,6,7,4,5};
+    float converted[2048*8];static const int remap[]={0,1,2,3,6,7,4,5};const float gain=master_gain();
     if(data){for(int f=0;f<p->frames;++f)for(int c=0;c<p->channels;++c){int target=p->channels==8&&!p->standard?remap[c]:c;int from=f*p->channels+c,to=f*p->channels+target;
         float value=p->floating?((const float *)data)[from]:(float)((const int16_t *)data)[from]/32768.0f;
-        converted[to]=value*(float)p->volume[c]/32768.0f;}
+        const float scaled=value*(float)p->volume[c]/32768.0f*gain;converted[to]=gain>1.0f?limit(scaled):scaled;}
         if(!SDL_PutAudioStreamData(p->stream,converted,p->frames*p->channels*4)){ReleaseSRWLockExclusive(&lock);return err(4);}
     }else SDL_ClearAudioStream(p->stream);
     ReleaseSRWLockExclusive(&lock);if(pace){now=SDL_GetTicksNS();if(now<deadline)SDL_DelayPrecise(deadline-now);}return 0;
