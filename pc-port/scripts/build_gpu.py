@@ -55,7 +55,8 @@ def build(check=False,jobs=4,output=None,lto='none',cpu='generic',dry_run=False)
     out,optimization_flags,link_flags=optimization_options(lto,cpu,jobs)
     ninja=(WORKSPACE/'build-opt/build.ninja').read_text(encoding='utf-8')
     defs=shlex.split(re.search(r'^  DEFINES = (.+)$',ninja,re.M).group(1))
-    includes=shlex.split(re.search(r'^  INCLUDES = (.+)$',ninja,re.M).group(1))
+    # Paths with forward slashes: some CMake versions write backslashes, which shlex.split drops.
+    includes=shlex.split(re.search(r'^  INCLUDES = (.+)$',ninja,re.M).group(1).replace('\\','/'))
     common=['decoder','error','io_file','native_clock','number_utils','rdtsc','spin_lock','recursive_lock','string_util','thread','signal_context','ntapi']
     sources=list((SOURCE/'video_core').rglob('*.cpp'))+list((SOURCE/'shader_recompiler').rglob('*.cpp'))
     sources=[p for p in sources if p.name!='renderdoc.cpp']
@@ -76,7 +77,7 @@ def build(check=False,jobs=4,output=None,lto='none',cpu='generic',dry_run=False)
     flags=['/nologo','/TP','/std:c++latest','/EHsc','/MD','/O2','/DNDEBUG','/clang:-Wno-deprecated-declarations',
            f'/I{ROOT / "gpu/shim"}',f'/I{ROOT / "gpu"}',
            f'/I{SOURCE / "core/libraries/gnmdriver"}']+defs+includes+optimization_flags
-    libs=shlex.split(re.search(r'^  LINK_LIBRARIES = (.+)$',ninja,re.M).group(1))
+    libs=shlex.split(re.search(r'^  LINK_LIBRARIES = (.+)$',ninja,re.M).group(1).replace('\\','/'))
     # Dependencies come from the known working build; no emulator objects/main are linked.
     libraries=[]
     for lib in libs:

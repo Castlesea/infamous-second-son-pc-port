@@ -467,7 +467,7 @@ std::wstring PrepareGame(const fs::path& game, const fs::path& out_file,
         mods.push_back(LoadModule(game / "eboot.bin", true));
         if (mods[0].sha256 != ExpectedEboot)
             return L"Unsupported eboot.bin version: this port needs the decrypted retail build of "
-                   L"inFAMOUS Second Son (CUSA00004) it was made for.";
+                   L"inFAMOUS Second Son (CUSA00004 or CUSA00223, the same eboot.bin) it was made for.";
         progress(0.55f, L"Reading sce_module");
         mods.push_back(LoadModule(game / "sce_module" / "libc.prx", false));
         mods.push_back(LoadModule(game / "sce_module" / "libSceFios2.prx", false));

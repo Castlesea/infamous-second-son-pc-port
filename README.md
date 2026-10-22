@@ -114,7 +114,9 @@ The whole controller is on the keyboard too, while the game window has the focus
   - GPU memory: Auto reads the game's memory from copies in video memory on NVIDIA (`ISS_UNIFIED_MEMORY=0`) and in place elsewhere. On an RTX 5070 Ti the in-place reads went over PCIe: the tiled lighting shader took 33-50 ms per frame, 22 FPS instead of 117 at 1080p.
 
   Wider than 16:9 keeps the game's vertical view and shows more to the sides (Hor+); the menus and HUD keep their size. See [Ultrawide](#ultrawide).
-- **Game:** the language, from the 14 the CUSA00004 package ships: English, French, Italian, German, Spanish, Dutch, Portuguese, Russian, Polish and Turkish (text and voices), Danish, Finnish, Norwegian and Swedish (subtitles, English voices).
+- **Game:** the language, from those your edition ships (both run the same `eboot.bin`):
+  - CUSA00004 (Europe), 14: English, French, Italian, German, Spanish, Dutch, Portuguese, Russian, Polish and Turkish (text and voices), Danish, Finnish, Norwegian and Swedish (subtitles, English voices);
+  - CUSA00223 (North America), 4: English, French, Spanish (Latin America) and Portuguese (Brazil), all with text and voices.
 - **Volume** (GAME tab): 50% to 200% of the game's own level, in steps of 5 (`ISS_VOLUME`). Above 100% the peaks go through a soft limiter instead of clipping.
 - **CONTROLS:** the controller layout described above.
 - **Shader cache:** it builds up from session to session. A session that crashes is rolled back, so a bad cache never sticks.

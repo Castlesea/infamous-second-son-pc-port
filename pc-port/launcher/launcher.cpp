@@ -5,8 +5,8 @@
 //   <root>\shaders\                             optional: library-v2\ (pipeline library), seed\
 //   <root>\user\                                launcher.ini, prepared\, saves\, shader-cache\, logs\
 // The game itself is never shipped: on first launch the user picks their own inFAMOUS Second Son
-// (CUSA00004) folder. The window art comes from that folder too: sce_sys\pic1.png (the crow, as on
-// the loading screen) behind the menu, darkened on the left. The logo is <root>\assets\logo.png
+// (CUSA00004 or CUSA00223) folder. The window art comes from that folder too: sce_sys\pic1.png (the
+// crow, as on the loading screen) behind the menu, darkened on the left. The logo is <root>\assets\logo.png
 // when present, else it is cut out of sce_sys\icon0.png (its black background made transparent).
 // PLAY starts bin\iss-probe.exe with the environment of the tested build (play_porte.py, porte-x)
 // plus the Settings, hides this window, and comes back when the game exits. The accumulated shader
@@ -103,13 +103,8 @@ std::vector<Setting> g_settings = {
     // shader (cs ce1675e0) took 33-50 ms instead of 0.9: 22 FPS instead of 117 at 1080p.
     {"gpu_memory", L"GPU memory", L"Auto: copies in video memory on NVIDIA, in place on others.",
      {{L"Auto", "auto"}, {L"In place", "1"}, {L"Video memory", "0"}}, TabGraphics},
-    // The languages of the CUSA00004 package (the PS4 system language ids, src/services.c
-    // ISS_LANGUAGE): ten with voices, the four Nordic ones subtitles only (English voices).
-    {"language", L"Language", L"Text and voices. Nordic languages: subtitles only.",
-     {{L"English", "1"}, {L"French", "2"}, {L"Italian", "5"}, {L"German", "4"}, {L"Spanish", "3"},
-      {L"Dutch", "6"}, {L"Portuguese", "7"}, {L"Russian", "8"}, {L"Polish", "16"}, {L"Turkish", "19"},
-      {L"Danish", "14"}, {L"Finnish", "12"}, {L"Norwegian", "15"}, {L"Swedish", "13"}},
-     TabGame},
+    // Its hint and choices are those of the game folder's edition (kEditions, ApplyEdition).
+    {"language", L"Language", L"", {}, TabGame},
     // ISS_VOLUME (src/audio.c): the game's sound level, 100% its own; above it the peaks are
     // softened instead of clipped. Index 10 = 100%.
     {"volume", L"Volume", L"100%: the game's own level. Up to 200% for a quiet mix.",
@@ -122,6 +117,28 @@ std::vector<Setting> g_settings = {
       {L"200%", "200"}},
      TabGame, 10},
 };
+
+// The editions the port runs. Their eboot.bin and sce_module are byte identical (the SHA-256
+// prepare_game.cpp checks); only the language packages (art\cache\lang_*) differ. The languages
+// are PS4 system language ids (src/services.c ISS_LANGUAGE), which the game uses as the index of
+// its own lang_%s_%s%s.xpp name table (english=1, french=2, ..., brazilian=17, latino=20).
+struct Edition {
+    const char* title_id;
+    const wchar_t* language_hint;
+    std::vector<Choice> languages;
+};
+const Edition kEditions[] = {
+    // Europe: ten with voices, the four Nordic ones subtitles only (English voices).
+    {"CUSA00004", L"Text and voices. Nordic languages: subtitles only.",
+     {{L"English", "1"}, {L"French", "2"}, {L"Italian", "5"}, {L"German", "4"}, {L"Spanish", "3"},
+      {L"Dutch", "6"}, {L"Portuguese", "7"}, {L"Russian", "8"}, {L"Polish", "16"}, {L"Turkish", "19"},
+      {L"Danish", "14"}, {L"Finnish", "12"}, {L"Norwegian", "15"}, {L"Swedish", "13"}}},
+    // North America: four, all with voices.
+    {"CUSA00223", L"Text and voices.",
+     {{L"English", "1"}, {L"French", "2"}, {L"Spanish (Latin America)", "20"},
+      {L"Portuguese (Brazil)", "17"}}},
+};
+void ApplyEdition(const std::string& language);
 std::wstring g_game_dir;
 std::map<std::string, std::string> g_extra; // other keys of launcher.ini (dev overrides)
 
@@ -199,13 +216,18 @@ fs::path ConfigPath() { return g_user / "launcher.ini"; }
 
 void LoadConfig() {
     std::ifstream f(ConfigPath());
-    std::string line;
+    std::string line, language;
     while (std::getline(f, line)) {
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
         if (key == "game_dir") {
             g_game_dir = Widen(value);
+            continue;
+        }
+        if (key == "language") {
+            // Its choices depend on the game folder, matched once all of the file is read.
+            language = value;
             continue;
         }
         bool known = false;
@@ -217,6 +239,7 @@ void LoadConfig() {
         }
         if (!known) g_extra[key] = value;
     }
+    ApplyEdition(language);
     ReadPadMap();
 }
 
@@ -271,15 +294,37 @@ bool FileContains(const fs::path& path, const char* needle) {
     return data.find(needle) != std::string::npos;
 }
 
-// Empty when the folder is an inFAMOUS Second Son (CUSA00004) game folder, else the reason.
+// The edition of a game folder (its sce_sys\param.sfo title id), else null.
+const Edition* GameEdition(const fs::path& dir) {
+    for (const auto& e : kEditions)
+        if (FileContains(dir / "sce_sys" / "param.sfo", e.title_id)) return &e;
+    return nullptr;
+}
+
+// The language choices of the game folder's edition (the first one without a game folder),
+// keeping language when that edition has it, else its first language (English).
+void ApplyEdition(const std::string& language) {
+    const Edition* e = g_game_dir.empty() ? nullptr : GameEdition(g_game_dir);
+    if (!e) e = &kEditions[0];
+    Setting& s = *std::find_if(g_settings.begin(), g_settings.end(),
+                               [](const Setting& x) { return !strcmp(x.key, "language"); });
+    s.hint = e->language_hint;
+    s.choices = e->languages;
+    s.index = 0;
+    for (size_t i = 0; i < s.choices.size(); ++i)
+        if (language == s.choices[i].value) s.index = int(i);
+}
+
+// Empty when the folder is an inFAMOUS Second Son game folder (an edition of kEditions), else the
+// reason.
 std::wstring CheckGameDir(const fs::path& dir) {
     std::error_code ec;
     if (dir.empty() || !fs::is_directory(dir, ec)) return L"Folder not found.";
     if (!fs::is_regular_file(dir / "eboot.bin", ec)) return L"eboot.bin is missing in this folder.";
     if (!fs::is_regular_file(dir / "sce_sys" / "param.sfo", ec))
         return L"sce_sys\\param.sfo is missing in this folder.";
-    if (!FileContains(dir / "sce_sys" / "param.sfo", "CUSA00004"))
-        return L"This is not inFAMOUS Second Son (CUSA00004).";
+    if (!GameEdition(dir))
+        return L"This is not inFAMOUS Second Son (CUSA00004 or CUSA00223).";
     if (!fs::is_regular_file(dir / "sce_module" / "libc.prx", ec))
         return L"sce_module\\libc.prx is missing in this folder.";
     return {};
@@ -294,7 +339,7 @@ std::wstring PickFolder(HWND owner) {
     DWORD options = 0;
     dialog->GetOptions(&options);
     dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-    dialog->SetTitle(L"Select your inFAMOUS Second Son (CUSA00004) game folder");
+    dialog->SetTitle(L"Select your inFAMOUS Second Son (CUSA00004 or CUSA00223) game folder");
     if (SUCCEEDED(dialog->Show(owner))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item))) {
@@ -586,7 +631,8 @@ bool PreparedReady() {
 }
 
 // DLC: the user's .pkg files of the game (entitlement-only packages). Their content id is at 0x40
-// of the package header ("\x7fCNT"): EP9000-CUSA00004_00-<16 character label>.
+// of the package header ("\x7fCNT"): EP9000-CUSA00004_00-<16 character label> (UP9000-CUSA00223_00-
+// for the North American edition; the game asks for the label only).
 std::vector<std::string> ScanDlcLabels(const fs::path& dir) {
     std::vector<std::string> labels;
     std::error_code ec;
@@ -602,7 +648,9 @@ std::vector<std::string> ScanDlcLabels(const fs::path& dir) {
         f.read(header, sizeof(header));
         if (memcmp(header, "\x7f" "CNT", 4) != 0) continue;
         const std::string id(header + 0x40, 36);
-        if (id.find("CUSA00004") == std::string::npos) continue;
+        if (std::none_of(std::begin(kEditions), std::end(kEditions),
+                         [&](const Edition& e) { return id.find(e.title_id) != std::string::npos; }))
+            continue;
         const std::string label = id.substr(20, 16);
         if (std::find(labels.begin(), labels.end(), label) == labels.end()) labels.push_back(label);
     }
@@ -1634,7 +1682,9 @@ void ChooseGameFolder() {
         SetStatus(why);
         return;
     }
+    const std::string language = SettingValue("language");
     g_game_dir = dir;
+    ApplyEdition(language);
     SaveConfig();
     LoadArt();
     ApplyExeIcon();

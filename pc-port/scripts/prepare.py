@@ -32,6 +32,8 @@ def _default_game():
 
 
 DEFAULT_GAME = _default_game()
+# CUSA00004 (Europe) and CUSA00223 (North America) ship this same eboot.bin.
+TITLE_IDS = ('CUSA00004', 'CUSA00223')
 EXPECTED_EBOOT = '2d1ca79630d7bbe6fa29575f59aa7996d43071d74ac8e4f7d40137967d9039ab'
 REFERENCE_COMMIT = '4d4d20812c0af23a11c8b8d40f5e06a9054925ef'
 
@@ -218,7 +220,7 @@ def prepare(game, out):
     if main['sha256'] != EXPECTED_EBOOT:
         raise ValueError('unsupported eboot identity; review a new build before executing')
     meta = sfo((game / 'sce_sys/param.sfo').read_bytes())
-    if meta.get('TITLE_ID') != 'CUSA00004':
+    if meta.get('TITLE_ID') not in TITLE_IDS:
         raise ValueError('unexpected title ID')
     bundled = [module(p) for p in sorted((game / 'sce_module').glob('*.prx'))]
     hints, hint_source = names_database()

@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from build_gpu import environment
+import toolchain
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "pc-port/out/tests"
@@ -17,7 +18,7 @@ def main() -> None:
                  "test_feedback_identity_registry"):
         exe = OUT / f"{name}.exe"
         subprocess.run([
-            str(ROOT / "tools/llvm/bin/clang-cl.exe"),
+            str(toolchain.clang()),
             "/nologo", "/std:c++20", "/EHsc", "/MD",
             f"/I{ROOT / 'pc-port/gpu'}",
             str(ROOT / f"pc-port/tests/{name}.cpp"),

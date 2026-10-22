@@ -39,8 +39,8 @@ you need your own copy.
 Requirements
 - Windows 10/11 64-bit, or a Steam Deck / Linux with Proton.
 - A GPU with Vulkan 1.3.
-- Your own decrypted dump of inFAMOUS Second Son (CUSA00004), the retail build this port was
-  made for: the folder that contains eboot.bin, sce_sys and sce_module. The launcher checks it.
+- Your own decrypted dump of inFAMOUS Second Son (CUSA00004 Europe or CUSA00223 North America,
+  the same eboot.bin), the retail build this port was made for: the folder that contains eboot.bin, sce_sys and sce_module. The launcher checks it.
 
 How to play
 1. Extract this folder anywhere you can write to (not inside Program Files).

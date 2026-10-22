@@ -195,7 +195,7 @@ Esse diretório está ignorado pelo Git e contém dados derivados do dump local.
 
 | Item | Resultado |
 |---|---|
-| Jogo | CUSA00004; APP_VER 01.00 / VERSION 01.07 |
+| Jogo | CUSA00004 (APP_VER 01.00 / VERSION 01.07) ou CUSA00223 (APP_VER 01.07 / VERSION 01.00); mesmo eboot |
 | SHA256 eboot | `2d1ca79630d7bbe6fa29575f59aa7996d43071d74ac8e4f7d40137967d9039ab` |
 | Imagem principal | 133.846.143 bytes, com BSS zerado |
 | Entry point | offset `+0x61dfd0` |
