@@ -117,6 +117,7 @@ The whole controller is on the keyboard too, while the game window has the focus
 - **Game:** the language, from those your edition ships (both run the same `eboot.bin`):
   - CUSA00004 (Europe), 14: English, French, Italian, German, Spanish, Dutch, Portuguese, Russian, Polish and Turkish (text and voices), Danish, Finnish, Norwegian and Swedish (subtitles, English voices);
   - CUSA00223 (North America), 4: English, French, Spanish (Latin America) and Portuguese (Brazil), all with text and voices.
+- **Volume** (GAME tab): 50% to 200% of the game's own level, in steps of 5 (`ISS_VOLUME`). Above 100% the peaks go through a soft limiter instead of clipping.
 - **CONTROLS:** the controller layout described above.
 - **Shader cache:** it builds up from session to session. A session that crashes is rolled back, so a bad cache never sticks.
 ## Ultrawide

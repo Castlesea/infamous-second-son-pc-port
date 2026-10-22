@@ -105,6 +105,17 @@ std::vector<Setting> g_settings = {
      {{L"Auto", "auto"}, {L"In place", "1"}, {L"Video memory", "0"}}, TabGraphics},
     // Its hint and choices are those of the game folder's edition (kEditions, ApplyEdition).
     {"language", L"Language", L"", {}, TabGame},
+    // ISS_VOLUME (src/audio.c): the game's sound level, 100% its own; above it the peaks are
+    // softened instead of clipped. Index 10 = 100%.
+    {"volume", L"Volume", L"100%: the game's own level. Up to 200% for a quiet mix.",
+     {{L"50%", "50"}, {L"55%", "55"}, {L"60%", "60"}, {L"65%", "65"}, {L"70%", "70"},
+      {L"75%", "75"}, {L"80%", "80"}, {L"85%", "85"}, {L"90%", "90"}, {L"95%", "95"},
+      {L"100%", "100"}, {L"105%", "105"}, {L"110%", "110"}, {L"115%", "115"}, {L"120%", "120"},
+      {L"125%", "125"}, {L"130%", "130"}, {L"135%", "135"}, {L"140%", "140"}, {L"145%", "145"},
+      {L"150%", "150"}, {L"155%", "155"}, {L"160%", "160"}, {L"165%", "165"}, {L"170%", "170"},
+      {L"175%", "175"}, {L"180%", "180"}, {L"185%", "185"}, {L"190%", "190"}, {L"195%", "195"},
+      {L"200%", "200"}},
+     TabGame, 10},
 };
 
 // The editions the port runs. Their eboot.bin and sce_module are byte identical (the SHA-256
@@ -757,6 +768,7 @@ std::wstring LaunchGame(HWND notify) {
     env[L"ISS_GPU_BLACKBOX"] = Widen(SettingValue("blackbox"));
     env[L"ISS_UNIFIED_MEMORY"] = Widen(UnifiedMemoryValue());
     env[L"ISS_LANGUAGE"] = Widen(SettingValue("language"));
+    env[L"ISS_VOLUME"] = Widen(SettingValue("volume"));
     if (const std::string map = PadMapString(); !map.empty()) env[L"ISS_PAD_MAP"] = Widen(map);
     {
         std::string labels;
