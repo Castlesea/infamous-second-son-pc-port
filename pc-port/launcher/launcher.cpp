@@ -108,6 +108,15 @@ std::vector<Setting> g_settings = {
     // and ISS_CRASH_THREADS (crash-threads.txt on a crash), in the session's log folder.
     {"diagnostics", L"Freeze and crash reports", L"Writes what every thread was doing when the game froze or crashed.",
      {{L"Off", "0"}, {L"On", "1"}}, TabAdvanced},
+    // ISS_CP_CPU (gpu/bridge.cpp): the command processor gets the last physical core alone, or
+    // shares the cores with the game's threads (which spin waiting for it).
+    {"cp_core", L"Command processor core", L"Dedicated: a core of its own. Shared: more cores for the game.",
+     {{L"Dedicated", "auto"}, {L"Shared", "off"}}, TabAdvanced},
+    // ISS_PAUSE_GUARD_PATHS (gpu/pause_guard.h): On keeps the native paths in the pause menu; Off
+    // turns them all off there and for 3 s after it, as before (the pause hung the GPU before
+    // ISS_NATIVE_PASSES_BLEND_DENY kept the blended draws into its UI layer on the command processor).
+    {"pause_paths", L"Pause menu acceleration", L"Off: the slower pause menu of earlier builds, if a menu hangs the GPU.",
+     {{L"On", "0"}, {L"Off", "63"}}, TabAdvanced},
     // ISS_UNIFIED_MEMORY: the GPU reads the game's memory in place (1) or from copies in video
     // memory (0). On an RTX 5070 Ti the in-place reads went over PCIe and the tiled lighting
     // shader (cs ce1675e0) took 33-50 ms instead of 0.9: 22 FPS instead of 117 at 1080p.
@@ -424,7 +433,7 @@ const char* const kGameEnvironment[][2] = {
     {"ISS_ASYNC_COMPUTE", "0"}, {"ISS_BARRIER_POOL", "1"},
     {"ISS_CAPTURE_FRAMES", "0"}, {"ISS_CAPTURE_OVERLAY", "0"}, {"ISS_CLAMP_CACHE_FIRST", "1"},
     {"ISS_COMMAND_TRACE", "0"}, {"ISS_COMPUTE_FAIRNESS", "1"}, {"ISS_COMPUTE_PHASES", "0"},
-    {"ISS_CPU_BUNDLE_INDEX_ONCE", "0"}, {"ISS_CPU_BUNDLE_SPV_VERIFIED", "0"}, {"ISS_CP_CPU", "14"},
+    {"ISS_CPU_BUNDLE_INDEX_ONCE", "0"}, {"ISS_CPU_BUNDLE_SPV_VERIFIED", "0"},
     {"ISS_CP_SPLIT", "0"}, {"ISS_DEEP_PROFILE", "0"}, {"ISS_DESCRIPTOR_DELTAS", "0"},
     {"ISS_DESCRIPTOR_FAST_PATH", "1"}, {"ISS_DIAGNOSTIC_SESSION", "0"}, {"ISS_DRAW_PIPE", "0"},
     {"ISS_ENGINE_MARKERS", "0"}, {"ISS_ENGINE_STATS", "0"}, {"ISS_FAST_DRAW", "1"},
@@ -825,6 +834,8 @@ std::wstring LaunchGame(HWND notify) {
     env[L"ISS_HUD_ASPECT"] = Widen(SettingValue("hud_width"));
     env[L"ISS_ASYNC_SKIP_DRAWS"] = Widen(SettingValue("shader_mode"));
     env[L"ISS_GPU_BLACKBOX"] = Widen(SettingValue("blackbox"));
+    env[L"ISS_CP_CPU"] = Widen(SettingValue("cp_core"));
+    env[L"ISS_PAUSE_GUARD_PATHS"] = Widen(SettingValue("pause_paths"));
     env[L"ISS_GPU_PROFILE"] = Widen(SettingValue("perf_log"));
     const bool reports = !strcmp(SettingValue("diagnostics"), "1");
     env[L"ISS_FREEZE_WATCHDOG_MS"] = reports ? L"3000" : L"0";

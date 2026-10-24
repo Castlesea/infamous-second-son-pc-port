@@ -558,13 +558,16 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
 // ISS_CP_CPU=L: the command processor thread limits the frame rate while several guest threads
 // spin on rdtsc waiting for it. The physical core of logical processor L is taken out of the
 // process default CPU sets (no other thread of the process runs there, its SMT sibling stays
-// idle) and the command processor is given logical processor L alone.
+// idle) and the command processor is given logical processor L alone. ISS_CP_CPU=auto, or an L
+// this machine does not have (14 was tuned on 16 threads; a 12 thread CPU has no 14), takes the
+// first logical processor of the last physical core. Unset, empty or "off": no pinning.
 uint64_t IssImageBase() { return host.image_base; }
 
 void IssPinCommandProcessor() {
     const char* value = std::getenv("ISS_CP_CPU");
-    if (!value || !*value) return;
-    const long wanted = std::strtol(value, nullptr, 10);
+    if (!value || !*value || !std::strcmp(value, "off")) return;
+    const bool automatic = !std::strcmp(value, "auto");
+    const long wanted = automatic ? -1 : std::strtol(value, nullptr, 10);
     ULONG length = 0;
     GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
     std::vector<char> buffer(length);
@@ -589,8 +592,18 @@ void IssPinCommandProcessor() {
         if (set.group == 0 && set.logical == wanted) mine = &set;
     }
     if (!mine) {
-        std::fprintf(stderr, "PORT_TUNING cp_cpu failed: logical processor %ld not found\n", wanted);
-        return;
+        for (const auto& set : sets) {
+            if (set.group != 0) continue;
+            if (!mine || set.core > mine->core || (set.core == mine->core && set.logical < mine->logical))
+                mine = &set;
+        }
+        if (!mine) {
+            std::fprintf(stderr, "PORT_TUNING cp_cpu failed: no logical processor in group 0\n");
+            return;
+        }
+        if (!automatic)
+            std::fprintf(stderr, "PORT_TUNING cp_cpu: logical processor %ld not found, using %u (last core)\n",
+                         wanted, unsigned(mine->logical));
     }
     std::vector<ULONG> others;
     for (const auto& set : sets) {
@@ -600,6 +613,6 @@ void IssPinCommandProcessor() {
         SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(), static_cast<ULONG>(others.size()));
     const ULONG id = mine->id;
     const BOOL thread_ok = SetThreadSelectedCpuSets(GetCurrentThread(), &id, 1);
-    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld core=%u process_default=%d(%zu sets) thread=%d\n",
-                 wanted, unsigned(mine->core), int(process_ok), others.size(), int(thread_ok));
+    std::fprintf(stderr, "PORT_TUNING cp_cpu=%u%s core=%u process_default=%d(%zu sets) thread=%d\n",
+                 unsigned(mine->logical), automatic ? " (auto)" : "", unsigned(mine->core), int(process_ok), others.size(), int(thread_ok));
 }

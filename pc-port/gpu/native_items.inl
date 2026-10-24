@@ -228,7 +228,7 @@ bool Rasterizer::PrepareNativeReadOnlyBuffer(const AmdGpu::Buffer& sharp, u64 sh
 
 bool Rasterizer::BindNativeMaterial(const Pipeline* pipeline, const Shader::Info& stage,
                                     Shader::Backend::Bindings& binding, Shader::PushData& push) {
-    if (iss::pause_guard::Blocked()) return false; // pause guard: original binding path
+    if (iss::pause_guard::Blocked(iss::pause_guard::Materials)) return false; // pause guard: original binding path
     if (!NativeContext() || stage.uses_dma || !pipeline->IsReady()) return false;
     auto* rec = NativeRecord(true);
     if (!rec || rec->disabled) return false;

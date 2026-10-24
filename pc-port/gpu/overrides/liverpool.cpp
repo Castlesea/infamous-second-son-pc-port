@@ -1935,7 +1935,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     const ns::Batch* batch = ns::Find(marker);
                     // Pause guard: in the pause the batch is interpreted (original engine path).
                     if (!batch || batch->end > dcb.data() + dcb.size() || CpSplitActive() ||
-                        iss::pause_guard::Blocked()) {
+                        iss::pause_guard::Blocked(iss::pause_guard::Shadows)) {
                         ns::NoteRange(ns::Mismatch, 0);
                         break;
                     }
@@ -1998,7 +1998,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     const ng::Batch* batch = ng::Find(marker);
                     // Pause guard: in the pause the range is interpreted (original engine path).
                     if (!batch || batch->end > dcb.data() + dcb.size() || CpSplitActive() ||
-                        iss::pause_guard::Blocked()) {
+                        iss::pause_guard::Blocked(iss::pause_guard::GBuffer)) {
                         ng::NoteRange(ng::Mismatch, 0);
                         break;
                     }
@@ -2068,7 +2068,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     nop->header.count.Value() == 8) {
                     const u32 kind = nop->data_block[0] & 255;
                     if (iss::native_item::Enabled()) {
-                        if (kind == 1 && iss::pause_guard::Blocked()) {
+                        if (kind == 1 && iss::pause_guard::Blocked(iss::pause_guard::FastDraw)) {
                             native_item_match = {}; // pause guard: original engine path
                         } else if (kind == 1) {
                             native_item_match = iss::native_item::Scan(dcb, true);
@@ -2291,7 +2291,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             u64 tick = 0;
                             const bool fits = seg->end > reinterpret_cast<const u32*>(header) &&
                                               seg->end <= dcb.data() + dcb.size();
-                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked(iss::pause_guard::Passes) &&
                                 rasterizer->NativePassExecute(
                                     *seg, [this](const u32* packet) { BeginScoutDraw(packet); },
                                     [this] { EndScoutDraw(); }, tick)) {
@@ -2387,7 +2387,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (rasterizer) rasterizer->NativeShadowLearnEnd();
                 };
                 if (rasterizer && shadow_draw != ~0u && shadow_draw > 0 && shadow_draw >= g_shadow_skip &&
-                    !iss::pause_guard::Blocked()) {
+                    !iss::pause_guard::Blocked(iss::pause_guard::Shadows)) {
                     const u32 done = Vulkan::ExecuteNativeShadowSuffix(*rasterizer, *g_shadow_range, shadow_draw);
                     if (done) {
                         g_shadow_skip = shadow_draw + done;
@@ -2525,7 +2525,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             u64 tick = 0;
                             const bool fits = seg->end > reinterpret_cast<const u32*>(header) &&
                                               seg->end <= dcb.data() + dcb.size();
-                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked(iss::pause_guard::Passes) &&
                                 rasterizer->NativePassExecute(
                                     *seg, [this](const u32* packet) { BeginScoutDraw(packet); },
                                     [this] { EndScoutDraw(); }, tick)) {
@@ -2657,7 +2657,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         } else {
                             u64 tick = 0;
                             const bool fits = seg->end > first && seg->end <= dcb.data() + dcb.size();
-                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked(iss::pause_guard::Passes) &&
                                 rasterizer->NativePassExecute(
                                     *seg, [this](const u32* packet) { BeginScoutDraw(packet); },
                                     [this] { EndScoutDraw(); }, tick)) {
@@ -2801,7 +2801,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             u64 tick = 0;
                             const bool fits = seg->end > reinterpret_cast<const u32*>(header) &&
                                               seg->end <= dcb.data() + dcb.size();
-                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                            if (fits && !CpSplitActive() && !iss::pause_guard::Blocked(iss::pause_guard::Compute) &&
                                 rasterizer->NativeComputeExecute(*seg, tick)) {
                                 auto& cs = GetCsRegs();
                                 auto* cs_words = reinterpret_cast<u32*>(&cs);
@@ -3780,7 +3780,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                             np::Finish(*seg, false, 0);
                         } else if (seg->kind == np::Kind::Compute) {
                             bool usable = seg->end > first && seg->end <= acb.data() + acb.size() &&
-                                          !CpSplitActive() && !iss::pause_guard::Blocked();
+                                          !CpSplitActive() && !iss::pause_guard::Blocked(iss::pause_guard::Compute);
                             // A dispatch whose dimensions a DMA patched is an indirect one.
                             for (const auto& patch : indirect_patches) {
                                 const u32* at = reinterpret_cast<const u32*>(patch.header);

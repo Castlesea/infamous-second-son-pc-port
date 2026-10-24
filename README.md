@@ -126,6 +126,8 @@ The whole controller is on the keyboard too, while the game window has the focus
 - **CONTROLS:** the controller layout described above.
 - **Shader cache:** it builds up from session to session. A session that crashes is rolled back, so a bad cache never sticks.
 - **Advanced:** the diagnostics below, and folders (DLC, game, saves, logs) and clearing the shader cache.
+  - *Command processor core:* Dedicated (default) gives the GPU command processor the last physical core alone; Shared leaves every core to the game.
+  - *Pause menu acceleration:* On (default) keeps the fast native paths in the pause menu; Off draws it through the slower original path, as earlier builds did, should a menu hang the GPU.
 
 ### Diagnostics
 

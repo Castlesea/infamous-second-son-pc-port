@@ -1360,8 +1360,8 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
     const bool pipelined=UseDrawPipe() && FilterDrawPasses();
     // ISS_NATIVE_PASSES learn request: the full path (DrawRecord), which keeps the template.
     const bool pass_learn = native_pass_learn != 0 && !pipelined;
-    // Pause guard (pause_guard.h): in the pause every native/fast path below is off.
-    const bool native_off = pass_learn || iss::pause_guard::Blocked();
+    // Pause guard (pause_guard.h, FastDraw): in the pause the native/fast paths below are off.
+    const bool native_off = pass_learn || iss::pause_guard::Blocked(iss::pause_guard::FastDraw);
     if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler);}
     iss::diagnostics::Scope phase_scope(iss::diagnostics::Draw);
     RENDERER_TRACE;
