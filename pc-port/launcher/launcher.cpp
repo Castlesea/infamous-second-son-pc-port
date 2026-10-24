@@ -115,6 +115,11 @@ std::vector<Setting> g_settings = {
      {{L"Auto", "auto"}, {L"In place", "1"}, {L"Video memory", "0"}}, TabGraphics},
     // Its hint and choices are those of the game folder's edition (kEditions, ApplyEdition).
     {"language", L"Language", L"", {}, TabGame},
+    // src/pad.c, controllers without a gyro or a touchpad (ISS_PAD_STICK_SPRAY, ISS_PAD_STICK_SWIPE).
+    {"stick_spray", L"Spray can on the right stick", L"No gyro: L3+R3 holds it (the mouse too), stick aims, A shakes, RB recenters.",
+     {{L"On", "1"}, {L"Off", "0"}}, TabGame},
+    {"stick_swipe", L"Touchpad swipes on the right stick", L"Hold a touchpad button (View) and push the stick to swipe.",
+     {{L"On", "1"}, {L"Off", "0"}}, TabGame},
 };
 
 // The games the port runs. Each has its own files under user\ (its game folder, settings,
@@ -826,6 +831,8 @@ std::wstring LaunchGame(HWND notify) {
     env[L"ISS_CRASH_THREADS"] = reports ? L"1" : L"0";
     env[L"ISS_UNIFIED_MEMORY"] = Widen(UnifiedMemoryValue());
     env[L"ISS_LANGUAGE"] = Widen(SettingValue("language"));
+    env[L"ISS_PAD_STICK_SPRAY"] = Widen(SettingValue("stick_spray"));
+    env[L"ISS_PAD_STICK_SWIPE"] = Widen(SettingValue("stick_swipe"));
     // Started from Steam, its Fossilize layer records every pipeline the game creates (thousands:
     // 300 MB in 30 s, ~100 ms per frame of pipeline creation and second-long stalls). The port
     // keeps its own pipeline cache, so the layer is turned off for the game.
@@ -1765,7 +1772,7 @@ void Paint(HDC hdc, int width, int height) {
         g.DrawString(L"?", -1, &label, help, &centre, &mark_brush);
         g_spots.push_back({RectF(help.X - S(4), help.Y - S(4), help.Width + S(8), help.Height + S(8)), HotHelp});
         if (g_hover == HotHelp || (g_focus == HotHelp && g_hover == HotNone)) {
-            const RectF box(float(width) - S(520), help.Y + S(38), S(490), S(262));
+            const RectF box(float(width) - S(520), help.Y + S(38), S(490), S(330));
             SolidBrush shade(Color(245, 14, 14, 16));
             g.FillRectangle(&shade, box);
             Pen edge(kYellow, S(1.2f));
@@ -1779,7 +1786,9 @@ void Paint(HDC hdc, int width, int height) {
                 L"F7   Spray can, for the graffiti missions: the mouse aims the can, hold the right button to "
                 L"shake it, hold the left button to spray. Shift: fine aim. Middle button: recenter. F7 again "
                 L"ends it.\n\n"
-                L"Keyboard: Space / Backspace press the left / right side of the touchpad, F8 both, 1-4 swipe.",
+                L"Keyboard: Space / Backspace press the left / right side of the touchpad, F8 both, 1-4 swipe.\n\n"
+                L"Controller without a gyro: L3+R3 holds it as the spray can with F7 (right stick aims, A shakes, RB "
+                L"recenters, R2 sprays). Hold View and push the right stick to swipe the touchpad.",
                 -1, &hint, RectF(box.X + S(16), box.Y + S(36), box.Width - S(32), box.Height - S(44)), nullptr,
                 &text_brush);
         }

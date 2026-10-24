@@ -52,6 +52,10 @@ What is still translated today is the rest of the GPU command processor; moving 
 
 The game asks for the PS4 touchpad in fast moments of gameplay (absorbing powers, finishers, prompts). On a controller without one, **View and Menu press the left and right side of the touchpad** by default, so it stays under your thumbs. **CONTROLS** in the launcher changes what each button does; PlayStation controllers use their own touchpad and keep their layout.
 
+- **Swipes:** hold a button that presses the touchpad (View by default) and push the right stick up, down, left or right. The stick does not turn the camera while that button is held, and the touch of the button is let go after a swipe until you release it.
+- **Spray can without a gyro:** at a graffiti spot, press **L3 and R3 together**. The controller is held on its side like a spray can (a short rumble confirms it) and the mouse's spray mode (F7) starts with it, so the stick and the mouse aim the same can: the right stick aims, **R2** sprays, **A** (cross on other controllers) shakes and **RB** recenters. Press L3 and R3 together again to end both. `ISS_STICK_SPRAY_SPEED` changes how fast the stick turns the can.
+- Both can be turned off in the launcher's GAME tab.
+
 ![The launcher's CONTROLS page](docs/media/launcher-controls.png)
 
 ### F5: the Touchpad & Spray window

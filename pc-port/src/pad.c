@@ -83,6 +83,19 @@ static const char *const touch_key_names[K_COUNT]={"touch_left","touch_right","t
     "swipe_down","swipe_left","swipe_right","mouse_touchpad","spray","panel"};
 static int touch_keys[K_COUNT]={VK_SPACE,VK_BACK,VK_F8,'T','1','2','3','4',VK_F6,VK_F7,VK_F5};
 static int pad_swipe=-1,source_was[SRC_COUNT];
+// Controllers without a gyro (ISS_PAD_STICK_SPRAY, default on): L3 and R3 pressed together start
+// the spray can of the graffiti missions and end it again (those presses are not passed on), with
+// the mouse's spray mode (F7). The controller is then held on its side like a can, the right stick
+// turns it as the mouse does (pad_read), A (cross) shakes it and RB recentres it; R2 sprays as
+// usual. Controllers with a gyro are the can themselves.
+static int stick_spray,stick_chord,stick_shake,stick_recentre,stick_rb_was;
+static float stick_aim[2];
+// Swipes without a touchpad (ISS_PAD_STICK_SWIPE, default on): while a button that touches the
+// touchpad (View by default) is held, the right stick swipes it, once each time it is pushed past
+// 60% and back under 30%, and does not turn the camera. That button's touch is let go from the
+// swipe until it is released, so the swipe does not end in a tap.
+static int swipe_armed=1,swipe_latched;
+static int option_on(const char *name){const char *s=getenv(name);return !s||s[0]!='0';}
 static void load_controls(void){
     const char *s=getenv("ISS_PAD_MAP");
     while(s&&*s){char item[64];size_t n=strcspn(s,",");if(n>=sizeof(item))n=sizeof(item)-1;memcpy(item,s,n);item[n]=0;s+=n;if(*s==',')++s;
@@ -95,14 +108,32 @@ static void load_controls(void){
     if(getenv("ISS_PAD_MAP")||getenv("ISS_TOUCH_KEYS")){fprintf(stderr,"PAD_MAP");for(int i=0;i<SRC_COUNT;++i)fprintf(stderr," %s=%s",source_names[i],targets[pad_map[i]].name);
         fprintf(stderr," keys");for(int k=0;k<K_COUNT;++k)fprintf(stderr," %s=%d",touch_key_names[k],touch_keys[k]);fputc('\n',stderr);}
 }
-static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],uint8_t lt,uint8_t rt,PadData *out,int contacts[2],uint16_t xy[2][2]){
-    for(int i=0;i<SRC_COUNT;++i){const int t=map[i],down=pressed[i];
+static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],uint8_t lt,uint8_t rt,int gyro,PadData *out,int contacts[2],uint16_t xy[2][2]){
+    static int spray_option=-1,swipe_option;
+    if(spray_option<0){spray_option=option_on("ISS_PAD_STICK_SPRAY");swipe_option=option_on("ISS_PAD_STICK_SWIPE");}
+    int held[SRC_COUNT];memcpy(held,pressed,sizeof(held));
+    const float sx=((float)out->rx-128)/127.f,sy=((float)out->ry-128)/127.f;
+    if(spray_option&&!gyro){
+        if(held[SRC_LS]&&held[SRC_RS]&&!stick_chord){stick_chord=1;stick_spray=!stick_spray;stick_recentre=1;}
+        if(stick_chord){if(!held[SRC_LS]&&!held[SRC_RS])stick_chord=0;held[SRC_LS]=held[SRC_RS]=0;}
+    }else stick_spray=stick_chord=0;
+    stick_shake=0;
+    if(stick_spray){stick_shake=held[SRC_A];if(held[SRC_RB]&&!stick_rb_was)stick_recentre=1;stick_rb_was=held[SRC_RB];
+        held[SRC_A]=held[SRC_RB]=0;stick_aim[0]=sx;stick_aim[1]=sy;out->rx=out->ry=128;}
+    int touch_held=0;
+    for(int i=0;i<SRC_COUNT;++i)if(held[i]&&map[i]>=T_TOUCH&&map[i]<=T_TOUCH_RIGHT)touch_held=1;
+    if(swipe_option&&touch_held&&!stick_spray){const float ax=fabsf(sx),ay=fabsf(sy),m=ax>ay?ax:ay;
+        if(swipe_armed&&m>.6f){pad_swipe=ay>=ax?(sy<0?0:1):(sx<0?2:3);swipe_armed=0;swipe_latched=1;}
+        if(m<.3f)swipe_armed=1;
+        out->rx=out->ry=128;
+    }else{swipe_armed=1;if(!touch_held)swipe_latched=0;}
+    for(int i=0;i<SRC_COUNT;++i){const int t=map[i],down=held[i];
         if(down&&!source_was[i]&&t>=T_SWIPE_UP)pad_swipe=t-T_SWIPE_UP;
         source_was[i]=down;
         const uint8_t amount=i==SRC_LT?lt:i==SRC_RT?rt:(down?255:0);
         if(t==T_L2&&amount>out->l2)out->l2=amount;
         if(t==T_R2&&amount>out->r2)out->r2=amount;
-        if(!down)continue;
+        if(!down||(swipe_latched&&t>=T_TOUCH&&t<=T_TOUCH_RIGHT))continue;
         out->buttons|=targets[t].bit;
         if(t==T_TOUCH){contacts[0]=1;xy[0][0]=960;xy[0][1]=471;}
         if(t==T_TOUCH_LEFT){contacts[0]=1;xy[0][0]=480;xy[0][1]=471;}
@@ -133,7 +164,8 @@ static int read_sdl(PadData *out,int contacts[2],uint16_t xy[2][2]){
     int pressed[SRC_COUNT];
     for(int i=0;i<SRC_COUNT;++i)pressed[i]=i==SRC_LT?lt>30:i==SRC_RT?rt>30:SDL_GetGamepadButton(sdl_pad,buttons[i]);
     const SDL_GamepadType type=SDL_GetGamepadType(sdl_pad);
-    apply_map(type==SDL_GAMEPAD_TYPE_PS4||type==SDL_GAMEPAD_TYPE_PS5?playstation_map:pad_map,pressed,lt,rt,out,contacts,xy);
+    apply_map(type==SDL_GAMEPAD_TYPE_PS4||type==SDL_GAMEPAD_TYPE_PS5?playstation_map:pad_map,pressed,lt,rt,
+              SDL_GamepadHasSensor(sdl_pad,SDL_SENSOR_GYRO),out,contacts,xy);
     if(SDL_GetGamepadButton(sdl_pad,SDL_GAMEPAD_BUTTON_TOUCHPAD))out->buttons|=0x100000;
     // A finger on any touchpad (the Steam Controller's two trackpads too) is the controller in use.
     pad_touching=0;
@@ -223,6 +255,15 @@ static void refresh_cursor(HWND window){
     POINT cursor;
     if(window&&GetCursorPos(&cursor)&&WindowFromPoint(cursor)==window)PostMessageW(window,WM_SETCURSOR,(WPARAM)window,MAKELPARAM(HTCLIENT,WM_MOUSEMOVE));
 }
+// The window title names the mode: the mouse's, else the right stick's spray can.
+static void show_mode(HWND window){
+    if(!window||(!base_title[0]&&!InternalGetWindowText(window,base_title,256)))return;
+    wchar_t title[320];
+    swprintf(title,320,L"%ls%ls",base_title,mouse_mode==1?L"  [touchpad: mouse]":
+             mouse_mode==2?(stick_spray?L"  [spray: mouse and right stick]":L"  [spray: mouse]"):
+             stick_spray?L"  [spray: right stick]":L"");
+    SendMessageTimeoutW(window,WM_SETTEXT,0,(LPARAM)title,SMTO_ABORTIFHUNG,50,NULL);
+}
 static void set_mouse_mode(int mode,HWND window){
     mouse_mode=mode;mouse_anchored=mouse_touch=0;spray_tick=0;memcpy(spray,spray_pose,sizeof(spray));
     spray_wait_release=mode==2; // the click that started it (the window's button) does not spray
@@ -231,10 +272,7 @@ static void set_mouse_mode(int mode,HWND window){
     if(mode==2){float dx,dy;pad_panel_raw(&dx,&dy);} // starts Raw Input, drops what was counted before
     if(!window)return;
     hook_game_window(window);PostMessageW(window,WM_SETCURSOR,(WPARAM)window,MAKELPARAM(HTCLIENT,WM_MOUSEMOVE));
-    if(!base_title[0]&&!InternalGetWindowText(window,base_title,256))return;
-    wchar_t title[320];
-    swprintf(title,320,L"%ls%ls",base_title,mode==1?L"  [touchpad: mouse]":mode==2?L"  [spray: mouse]":L"");
-    SendMessageTimeoutW(window,WM_SETTEXT,0,(LPARAM)title,SMTO_ABORTIFHUNG,50,NULL);
+    show_mode(window);
 }
 static uint8_t axis(int16_t v){return (uint8_t)(((int)v+32768)>>8);}
 static int32_t error(unsigned n){return (int32_t)(UINT32_C(0x80920000)|n);}
@@ -267,13 +305,12 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
             XINPUT_GAMEPAD_DPAD_UP,XINPUT_GAMEPAD_DPAD_DOWN,XINPUT_GAMEPAD_DPAD_LEFT,XINPUT_GAMEPAD_DPAD_RIGHT};
         int pressed[SRC_COUNT];
         for(int i=0;i<SRC_COUNT;++i)pressed[i]=i==SRC_LT?lt>30:i==SRC_RT?rt>30:xb[i]&&(g->wButtons&xb[i]);
-        apply_map(pad_map,pressed,lt,rt,out,contacts,xy);
+        apply_map(pad_map,pressed,lt,rt,0,out,contacts,xy);
     }
     // The controller's own activity (the keyboard is read below): a button, a trigger, a stick off
     // its centre or a finger on a touchpad.
     const int active=out->buttons||out->l2>30||out->r2>30||(sdl&&pad_touching)||abs(out->lx-128)>24||abs(out->ly-128)>24||
         abs(out->rx-128)>24||abs(out->ry-128)>24;
-    if(pad_swipe>=0){swipe_direction=pad_swipe;swipe_started=out->timestamp;was_touch[0]=0;pad_swipe=-1;}
     DWORD foreground=0;GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
     const int focused=foreground==GetCurrentProcessId();
     int mouse_left=0,mouse_right=0;float mouse_dx=0,mouse_dy=0;
@@ -326,6 +363,9 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
             }
         }
     }else{memset(swipe_keys,0,sizeof(swipe_keys));swipe_direction=-1;mouse_anchored=mouse_touch=0;}
+    // A controller swipe (a button mapped to one, or the right stick): the controller is read
+    // without the focus too.
+    if(pad_swipe>=0){swipe_direction=pad_swipe;swipe_started=out->timestamp;was_touch[0]=0;pad_swipe=-1;}
     if(played_with_pad(sdl||xinput,active)!=pad_in_use){pad_in_use=!pad_in_use;refresh_cursor(game_window);
         fprintf(stderr,"PAD input from the %s\n",pad_in_use?"controller":"keyboard and mouse");}
     // The touchpad window (F5): a finger where it is pressed and dragged (Shift: two, mirrored),
@@ -346,6 +386,22 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
     if(cmd_spray_toggle){cmd_spray_toggle=0;set_mouse_mode(mouse_mode==2?0:2,game_window);spray_wait_release=0;}
     if(cmd_spray_center){cmd_spray_center=0;memcpy(spray,spray_pose,sizeof(spray));}
     const double cmd_now=(double)out->timestamp/1e6;
+    // The spray can on the right stick (stick_spray, apply_map) starts and ends the mouse's spray
+    // mode too, so both turn the same can. The push is a turn rate, squared past a 12% dead zone for
+    // fine aim, as fast as 400 pixels of mouse per second at full push (ISS_STICK_SPRAY_SPEED scales
+    // it). A short rumble tells it started (longer) or ended.
+    static int stick_shown;static uint64_t stick_tick;static float stick_speed=-1;
+    if(stick_speed<0){const char *s=getenv("ISS_STICK_SPRAY_SPEED");stick_speed=s?(float)atof(s):1;if(!(stick_speed>0))stick_speed=1;}
+    if(!sdl&&!xinput)stick_spray=stick_chord=0; // unplugged: the stick it was aiming with is gone
+    if(stick_spray!=stick_shown){stick_shown=stick_spray;fprintf(stderr,"PAD_STICK spray %s\n",stick_spray?"on":"off");
+        if(stick_spray!=(mouse_mode==2))set_mouse_mode(stick_spray?2:0,game_window);else show_mode(game_window);
+        if(sdl_pad)SDL_RumbleGamepad(sdl_pad,0x6000,0x6000,stick_spray?250:100);}
+    float stick_turn[2]={0,0},stick_dt=0;
+    if(stick_spray){
+        if(stick_recentre){stick_recentre=0;memcpy(spray,spray_pose,sizeof(spray));stick_tick=0;}
+        stick_dt=stick_tick?(float)(out->timestamp-stick_tick)/1e6f:0;stick_tick=out->timestamp;if(stick_dt>0.1f)stick_dt=0.1f;
+        for(int i=0;i<2;++i){const float a=fabsf(stick_aim[i]),v=a>.12f?(a-.12f)/.88f:0;stick_turn[i]=(stick_aim[i]<0?-v*v:v*v)*400*stick_speed*stick_dt;}
+    }
     if(mouse_mode==2&&cmd_now<cmd_aim_until){mouse_dx+=cmd_aim_dx;mouse_dy+=cmd_aim_dy;}
     if(mouse_mode==2){
         const float dt=spray_tick?(float)(out->timestamp-spray_tick)/1e6f:0;spray_tick=out->timestamp;
@@ -353,9 +409,13 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         const float scale=panel.sensitivity*(focused&&key(VK_SHIFT)?.35f:1.f);
         if(!focused&&cmd_now>=cmd_aim_until)mouse_dx=mouse_dy=0;
         if(spray_wait_release){if(!mouse_left&&!mouse_right)spray_wait_release=0;mouse_left=mouse_right=0;}
-        pad_spray_step(spray,mouse_dx*scale,mouse_dy*scale,dt>0.1f?0.1f:dt,(focused&&mouse_right)||cmd_now<cmd_shake_until,(double)out->timestamp/1e6,out->angular,out->acceleration);
+        pad_spray_step(spray,mouse_dx*scale+stick_turn[0],mouse_dy*scale+stick_turn[1],dt>0.1f?0.1f:dt,
+                       (focused&&mouse_right)||cmd_now<cmd_shake_until||stick_shake,(double)out->timestamp/1e6,out->angular,out->acceleration);
         memcpy(out->orientation,spray,sizeof(spray));
         if(focused&&mouse_left){out->r2=255;}
+    }else if(stick_spray){ // F7 ended the mouse's part: the stick turns the can alone
+        pad_spray_step(spray,stick_turn[0],stick_turn[1],stick_dt,stick_shake,(double)out->timestamp/1e6,out->angular,out->acceleration);
+        memcpy(out->orientation,spray,sizeof(spray));
     }
 
     // ISS_PAD_REAL=0 (scripted runs): the real controller and keyboard are ignored, only the pad
