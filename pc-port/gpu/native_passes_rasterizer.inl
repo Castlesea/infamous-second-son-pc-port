@@ -963,6 +963,7 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
             if (it != tables.templates.end()) t = it->second;
         }
         if (!t) return miss(MissTemplate, LearnGate(NativeMaterial::Mix(key, material)));
+        NativeMaterial::Touch(*t);
         if (t->pipeline != shape && !NativeRecorder::InstallViews(*t->pipeline, regs, views, num_views))
             return miss(MissViews);
     }
