@@ -138,7 +138,7 @@ struct Game {
     const char* key;          // --game <key>, user\game.txt
     const wchar_t* name;      // window titles and messages
     const char* env_name;     // ISS_GAME_NAME
-    const char* title_id;     // ISS_TITLE_ID (both Second Son editions keep CUSA00004's folders)
+    const char* title_id;     // ISS_TITLE_ID (each game's editions keep its first edition's folders)
     const wchar_t* subtitle;  // the title in type, under "inFAMOUS"
     const char* user_dir;     // under user\ ("" for user\ itself)
     bool second_son_art;      // the release's shaders, logo and crow icon are Second Son's
@@ -173,6 +173,10 @@ const Edition kEditions[] = {
       {L"Portuguese (Brazil)", "17"}}},
     // First Light, Europe: the same languages as Second Son's (art\cache\lang_*).
     {"CUSA00897", &kGames[1], L"Text and voices. Nordic languages: subtitles only.", kEuropeLanguages},
+    // First Light, North America: the same eboot.bin (1.04) and languages as Second Son's CUSA00223.
+    {"CUSA00575", &kGames[1], L"Text and voices.",
+     {{L"English", "1"}, {L"French", "2"}, {L"Spanish (Latin America)", "20"},
+      {L"Portuguese (Brazil)", "17"}}},
 };
 void ApplyEdition(const std::string& language);
 std::wstring g_game_dir;
