@@ -239,15 +239,31 @@ static void hook_game_window(HWND window){
     game_proc=(WNDPROC)SetWindowLongPtrW(window,GWLP_WNDPROC,(LONG_PTR)game_window_proc);
 }
 // The cursor is hidden while the controller is played, and shown again once the keyboard or the
-// mouse is used: input Windows counts (GetLastInputInfo) while the controller has been still
-// for half a second. Steam's desktop layout turns the Steam Controller's trackpad and buttons into
-// mouse and key input, which comes with the controller's own activity.
+// mouse is used while the controller has been still for half a second: the mouse moved 6 px or more
+// from where it rested while the controller was played, or a key or mouse button is down. Windows'
+// count of input (GetLastInputInfo) only says when to look; it also counts input nobody gave
+// (other programs, overlays, wireless dongles), which showed the cursor at random (2026-11-02).
+// Steam's desktop layout turns the Steam Controller's trackpad and buttons into mouse and key
+// input, which comes with the controller's own activity.
+int pad_cursor_wakes(int dx,int dy,int pressed,unsigned long long still_ms){
+    return still_ms>500&&(pressed||dx*dx+dy*dy>=36);
+}
+static int keyboard_or_mouse_pressed(void){
+    for(int code=1;code<255;++code)if(code!=VK_PACKET&&key(code))return 1;
+    return 0;
+}
 static int played_with_pad(int connected,int active){
-    static int keyboard_mouse;static DWORD last_input;static ULONGLONG pad_active;
+    static int keyboard_mouse,rest_set;static DWORD last_input;static ULONGLONG pad_active;static POINT rest;
     const ULONGLONG now=GetTickCount64();
-    if(active){pad_active=now;keyboard_mouse=0;}
+    POINT cursor;const int have_cursor=GetCursorPos(&cursor)!=0;
+    if(active){pad_active=now;keyboard_mouse=0;if(have_cursor){rest=cursor;rest_set=1;}}
     LASTINPUTINFO info={sizeof(info),0};
-    if(GetLastInputInfo(&info)&&info.dwTime!=last_input){if(last_input&&now-pad_active>500)keyboard_mouse=1;last_input=info.dwTime;}
+    if(GetLastInputInfo(&info)&&info.dwTime!=last_input){
+        if(last_input&&!keyboard_mouse){
+            if(have_cursor&&!rest_set){rest=cursor;rest_set=1;}
+            const int dx=have_cursor?cursor.x-rest.x:0,dy=have_cursor?cursor.y-rest.y:0;
+            if(pad_cursor_wakes(dx,dy,keyboard_or_mouse_pressed(),now-pad_active))keyboard_mouse=1;}
+        last_input=info.dwTime;}
     return connected&&!keyboard_mouse;
 }
 // The cursor changes when it next moves; this applies the change while it rests on the window.
