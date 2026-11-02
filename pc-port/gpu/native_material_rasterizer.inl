@@ -233,6 +233,8 @@ struct Rasterizer::NativeMaterialTemplate {
     vk::SampleCountFlagBits samples{vk::SampleCountFlagBits::e1};
     u64 samplers_generation{};
     mutable std::atomic<u64> cache_generation{};
+    /// The learn clock (Tables::clock) at its last use: the least recently used are evicted.
+    mutable std::atomic<u32> last_used{};
     u64 key{};
     bool has_samplers{};
 };
@@ -246,12 +248,73 @@ struct Tables {
     std::unordered_map<u64, const GraphicsPipeline*> shapes; ///< state key -> first pipeline
     std::unordered_map<u64, std::shared_ptr<const Template>> templates;
     std::unordered_map<u64, std::shared_ptr<const DynamicState>> dynamics; ///< by state bytes
+    std::atomic<u32> clock{}; ///< advanced by every learn
 };
 // The dynamic state values (the bind cache, last, left out).
 constexpr size_t DynamicBytes = offsetof(DynamicState, binds);
 static Tables& State() {
     static Tables tables;
     return tables;
+}
+
+// Marks a template used (any thread). The clock moves only when one is learned, so most uses
+// find it current and write nothing.
+static void Touch(const Template& t) {
+    const u32 now = State().clock.load(std::memory_order_relaxed);
+    if (t.last_used.load(std::memory_order_relaxed) != now)
+        t.last_used.store(now, std::memory_order_relaxed);
+}
+
+// ISS_NATIVE_MATERIALS_MAX (default 1048576, ~2 KB each). At the old cap of 131072, reached after
+// 8-10 minutes of play, every drop (of all the templates, or of the least recently used half)
+// left the command processor 40-100 times slower for good: 1-3 FPS with the same draws
+// (2026-10-31, RX 9060 XT). Why is not known; a session should not reach the cap, and past it
+// the least recently used half is dropped (command processor, under the exclusive lock).
+static size_t MaxTemplates() {
+    static const size_t max = [] {
+        const char* p = std::getenv("ISS_NATIVE_MATERIALS_MAX");
+        const size_t value = p ? std::strtoull(p, nullptr, 10) : 0;
+        return value >= 1024 ? value : size_t(1) << 20;
+    }();
+    return max;
+}
+static void EvictTemplates(Tables& tables) {
+    const auto start = std::chrono::steady_clock::now();
+    const u32 now = tables.clock.load(std::memory_order_relaxed);
+    const auto age = [now](const Template& t) {
+        return now - t.last_used.load(std::memory_order_relaxed);
+    };
+    std::vector<u32> ages;
+    ages.reserve(tables.templates.size());
+    u32 max_age = 0;
+    for (const auto& [key, t] : tables.templates) {
+        ages.push_back(age(*t));
+        max_age = std::max(max_age, ages.back());
+    }
+    const size_t keep = MaxTemplates() / 2;
+    auto nth = ages.begin() + (ages.size() - keep);
+    std::nth_element(ages.begin(), nth, ages.end(), std::greater<u32>());
+    const u32 cutoff = *nth; // the age of the oldest kept
+    std::vector<std::shared_ptr<const Template>> dropped;
+    dropped.reserve(ages.size() - keep);
+    for (int pass = 0; pass < 2 && tables.templates.size() > keep; ++pass) {
+        // First the older than the cutoff, then as many of its age as are still over.
+        for (auto it = tables.templates.begin(); it != tables.templates.end();) {
+            const u32 a = age(*it->second);
+            if (a > cutoff || (pass == 1 && a == cutoff && tables.templates.size() > keep)) {
+                dropped.push_back(std::move(it->second));
+                it = tables.templates.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    const size_t count = dropped.size();
+    iss::DestroyInBackground(dropped);
+    std::fprintf(stderr, "NATIVE_MATERIALS_EVICT dropped=%zu kept=%zu max_age=%u cutoff=%u ms=%.2f\n",
+                 count, tables.templates.size(), max_age, cutoff,
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                     .count());
 }
 
 // The template's writes with the draw's buffer infos (one per buffer slot).
@@ -319,6 +382,7 @@ const Rasterizer::NativeMaterialTemplate* Rasterizer::NativeMaterialFind(u64 sta
         return nullptr;
     }
     const auto& t = *it->second;
+    Touch(t);
     if (t.pipeline != shape) Refresh(*t.pipeline);
     return &t;
 }
@@ -519,7 +583,9 @@ void Rasterizer::NativeMaterialLearn(u64 state_key, const GraphicsPipeline* pipe
     t->key = Mix(state_key, MaterialHash(*shape));
     {
         std::unique_lock lock{tables.mutex};
-        if (tables.templates.size() >= 131072) iss::DestroyInBackground(tables.templates);
+        if (tables.templates.size() >= MaxTemplates()) EvictTemplates(tables);
+        t->last_used.store(tables.clock.fetch_add(1, std::memory_order_relaxed) + 1,
+                           std::memory_order_relaxed);
         const auto& live = scheduler.GetDynamicState();
         const u64 dynamic_hash = XXH3_64bits(&live, DynamicBytes);
         auto& shared = tables.dynamics[dynamic_hash];

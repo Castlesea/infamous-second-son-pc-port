@@ -522,6 +522,7 @@ static ng::Recording* RecordBatch(const ng::Batch& b, const ng::RangeStart& star
                 if (it != tables.templates.end()) t = it->second;
             }
             if (!t) return fail(MissTemplate);
+            NativeMaterial::Touch(*t);
             if (t->pipeline != shape && !InstallViews(*t->pipeline, regs, views, num_views))
                 return fail(MissState);
         }
