@@ -32,6 +32,7 @@ static int pad_in_use,pad_touching;
 static int sdl_ready;
 static int swipe_direction=-1,swipe_keys[4];
 static uint64_t swipe_started;
+static uint32_t pad_generation;
 static void scan_gamepads(void){
     uint64_t now=SDL_GetTicks();
     if(sdl_pad&&!SDL_GamepadConnected(sdl_pad)){fprintf(stderr,"PAD disconnected\n");SDL_CloseGamepad(sdl_pad);sdl_pad=NULL;scan_tick=0;}
@@ -43,7 +44,7 @@ static void scan_gamepads(void){
     if(!chosen||(sdl_pad&&SDL_GetGamepadID(sdl_pad)==chosen))return;
     SDL_Gamepad *next=SDL_OpenGamepad(chosen);if(!next){fprintf(stderr,"PAD open failed: %s\n",SDL_GetError());return;}
     if(sdl_pad)SDL_CloseGamepad(sdl_pad);sdl_pad=next;
-    memset(was_touch,0,sizeof(was_touch));memset(quaternion,0,sizeof(quaternion));quaternion[3]=1;sensor_tick=0;
+    ++pad_generation; // read_sdl resets its touch and motion state for the new controller
     bool gyro=SDL_SetGamepadSensorEnabled(next,SDL_SENSOR_GYRO,true);
     bool accel=SDL_SetGamepadSensorEnabled(next,SDL_SENSOR_ACCEL,true);
     // Valve's controllers (Steam Controller, Steam Deck) measure +-2 G, a DualShock 4 +-4 G (see
@@ -148,37 +149,127 @@ void pad_accel_gain(float accel[3],float gravity[3],float gain,float dt){
     const float k=dt>0&&dt<.3f?dt/.3f:1;
     for(int i=0;i<3;++i){gravity[i]+=(accel[i]-gravity[i])*k;const float v=gravity[i]+gain*(accel[i]-gravity[i]);accel[i]=v>4?4:v<-4?-4:v;}
 }
+// Controller I/O off the game's threads (ISS_PAD_THREAD, default on; 0: on the reading thread, as
+// before). SDL_UpdateGamepads does the controller's USB/HID I/O, and some drivers block in it: SDL's
+// Switch Pro driver writes synchronously when a wired controller sent no report for 100 ms, and every
+// rumble write of HIDAPI drivers shares one lock with the rumble thread's writes (a Switch-protocol
+// clone, the EasySMX X20 in NS mode wired: 69 frames over 50 ms in 7.5 min against 6 in 4.6 min as an
+// Xbox controller, 2026-11-01; the game calls scePadSetVibration every frame of a subdue). The
+// "ISS:PadIO" thread does SDL's init, updates every 2 ms, opens and closes the controller and applies
+// rumble and LED requests; scePadReadState copies its last snapshot, scePadSetVibration and
+// scePadSetLightBar only post a request.
+typedef struct {
+    int connected,has_gyro,touchpads,any_finger,fingers;uint32_t generation;SDL_GamepadType type;
+    int16_t axes[SDL_GAMEPAD_AXIS_COUNT];uint64_t buttons;struct {bool down;float x,y;} finger[2];
+    float gyro[3],accel[3],accel_gain;
+} PadSnapshot;
+static int pad_thread_mode;
+static PadSnapshot pad_snap;static SRWLOCK snap_lock=SRWLOCK_INIT,request_lock=SRWLOCK_INIT;
+static HANDLE pad_wake,pad_init_done;
+static volatile LONG pad_connected,rumble_seq,led_seq;
+static Uint16 rumble_lo,rumble_hi;static Uint32 rumble_ms;static uint64_t rumble_tick;static uint8_t led_rgb[3];
+static LONG rumble_applied,led_applied;
+static void fill_snapshot(PadSnapshot *s){
+    memset(s,0,sizeof(*s));s->generation=pad_generation;s->accel_gain=accel_gain;s->accel[1]=SDL_STANDARD_GRAVITY;
+    if(!sdl_pad)return;
+    s->connected=1;s->type=SDL_GetGamepadType(sdl_pad);s->has_gyro=SDL_GamepadHasSensor(sdl_pad,SDL_SENSOR_GYRO);
+    for(int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a)s->axes[a]=SDL_GetGamepadAxis(sdl_pad,(SDL_GamepadAxis)a);
+    for(int b=0;b<SDL_GAMEPAD_BUTTON_COUNT&&b<64;++b)if(SDL_GetGamepadButton(sdl_pad,(SDL_GamepadButton)b))s->buttons|=UINT64_C(1)<<b;
+    s->touchpads=SDL_GetNumGamepadTouchpads(sdl_pad);
+    for(int t=0;t<s->touchpads;++t)for(int i=0;i<SDL_GetNumGamepadTouchpadFingers(sdl_pad,t);++i){bool down=false;
+        if(SDL_GetGamepadTouchpadFinger(sdl_pad,t,i,&down,NULL,NULL,NULL)&&down)s->any_finger=1;}
+    if(s->touchpads>0){s->fingers=SDL_GetNumGamepadTouchpadFingers(sdl_pad,0);
+        for(int i=0;i<2&&i<s->fingers;++i){float pressure=0;
+            if(!SDL_GetGamepadTouchpadFinger(sdl_pad,0,i,&s->finger[i].down,&s->finger[i].x,&s->finger[i].y,&pressure))s->finger[i].down=false;}}
+    SDL_GetGamepadSensorData(sdl_pad,SDL_SENSOR_GYRO,s->gyro,3);SDL_GetGamepadSensorData(sdl_pad,SDL_SENSOR_ACCEL,s->accel,3);
+}
+static void apply_requests(void){
+    const LONG r=rumble_seq,l=led_seq;
+    if(r!=rumble_applied){rumble_applied=r;AcquireSRWLockShared(&request_lock);const Uint16 lo=rumble_lo,hi=rumble_hi;const Uint32 ms=rumble_ms;ReleaseSRWLockShared(&request_lock);
+        if(sdl_pad)SDL_RumbleGamepad(sdl_pad,lo,hi,ms);}
+    if(l!=led_applied){led_applied=l;AcquireSRWLockShared(&request_lock);const uint8_t c[3]={led_rgb[0],led_rgb[1],led_rgb[2]};ReleaseSRWLockShared(&request_lock);
+        if(sdl_pad)SDL_SetGamepadLED(sdl_pad,c[0],c[1],c[2]);}
+}
+static void pad_io_step(PadSnapshot *s){
+    SDL_UpdateGamepads();scan_gamepads();apply_requests();fill_snapshot(s);InterlockedExchange(&pad_connected,s->connected);
+}
+// force: always sent (the spray can's start/end pulse); otherwise a repeat of the same motors within
+// 500 ms is dropped (the game sends them every frame; each request lasts 1 s).
+static void request_rumble(Uint16 lo,Uint16 hi,Uint32 ms,int force){
+    const uint64_t now=GetTickCount64();
+    AcquireSRWLockExclusive(&request_lock);
+    const int same=!force&&lo==rumble_lo&&hi==rumble_hi&&ms==rumble_ms&&now-rumble_tick<500;
+    if(!same){rumble_lo=lo;rumble_hi=hi;rumble_ms=ms;rumble_tick=now;}
+    ReleaseSRWLockExclusive(&request_lock);
+    if(same)return;
+    InterlockedIncrement(&rumble_seq);
+    if(pad_thread_mode)SetEvent(pad_wake);else apply_requests();
+}
+static void request_led(const uint8_t rgb[3]){
+    AcquireSRWLockExclusive(&request_lock);
+    const int same=led_seq&&!memcmp(led_rgb,rgb,3);if(!same)memcpy(led_rgb,rgb,3);
+    ReleaseSRWLockExclusive(&request_lock);
+    if(same)return;
+    InterlockedIncrement(&led_seq);
+    if(pad_thread_mode)SetEvent(pad_wake);else apply_requests();
+}
+static void pad_sdl_init(void){
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4,"1");
+    // SDL_PumpEvents (the window thread) updates the joysticks too unless told not to: with the
+    // I/O thread, it alone talks to the controller.
+    if(pad_thread_mode)SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS,"0");
+    sdl_ready=SDL_InitSubSystem(SDL_INIT_GAMEPAD);if(sdl_ready){SDL_SetGamepadEventsEnabled(false);SDL_SetJoystickEventsEnabled(false);}
+    else fprintf(stderr,"PAD SDL init failed, using XInput: %s\n",SDL_GetError());
+}
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+static DWORD WINAPI pad_io_main(void *unused){
+    (void)unused;
+    typedef HRESULT (WINAPI *Describe)(HANDLE,PCWSTR);
+    const Describe describe=(Describe)(void(*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"SetThreadDescription");
+    if(describe)describe(GetCurrentThread(),L"ISS:PadIO");
+    SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_ABOVE_NORMAL);
+    pad_sdl_init();SetEvent(pad_init_done);if(!sdl_ready)return 0;
+    HANDLE timer=CreateWaitableTimerExW(NULL,NULL,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    for(;;){PadSnapshot s;pad_io_step(&s);
+        AcquireSRWLockExclusive(&snap_lock);pad_snap=s;ReleaseSRWLockExclusive(&snap_lock);
+        if(timer){LARGE_INTEGER due;due.QuadPart=-20000; // 2 ms
+            SetWaitableTimer(timer,&due,0,NULL,NULL,FALSE);HANDLE wait[2]={timer,pad_wake};WaitForMultipleObjects(2,wait,FALSE,INFINITE);}
+        else WaitForSingleObject(pad_wake,2);}
+}
 static int read_sdl(PadData *out,int contacts[2],uint16_t xy[2][2]){
-    if(!sdl_ready)return 0;SDL_UpdateGamepads();scan_gamepads();if(!sdl_pad)return 0;
+    if(!sdl_ready)return 0;
+    PadSnapshot s;
+    if(pad_thread_mode){AcquireSRWLockShared(&snap_lock);s=pad_snap;ReleaseSRWLockShared(&snap_lock);}
+    else pad_io_step(&s);
+    static uint32_t seen_generation;
+    if(s.generation!=seen_generation){seen_generation=s.generation;
+        memset(was_touch,0,sizeof(was_touch));memset(quaternion,0,sizeof(quaternion));quaternion[3]=1;sensor_tick=0;}
+    if(!s.connected)return 0;
     static const SDL_GamepadButton buttons[SRC_COUNT]={SDL_GAMEPAD_BUTTON_SOUTH,SDL_GAMEPAD_BUTTON_EAST,SDL_GAMEPAD_BUTTON_WEST,
         SDL_GAMEPAD_BUTTON_NORTH,SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,SDL_GAMEPAD_BUTTON_INVALID,
         SDL_GAMEPAD_BUTTON_INVALID,SDL_GAMEPAD_BUTTON_LEFT_STICK,SDL_GAMEPAD_BUTTON_RIGHT_STICK,SDL_GAMEPAD_BUTTON_BACK,
         SDL_GAMEPAD_BUTTON_START,SDL_GAMEPAD_BUTTON_GUIDE,SDL_GAMEPAD_BUTTON_MISC1,SDL_GAMEPAD_BUTTON_DPAD_UP,
         SDL_GAMEPAD_BUTTON_DPAD_DOWN,SDL_GAMEPAD_BUTTON_DPAD_LEFT,SDL_GAMEPAD_BUTTON_DPAD_RIGHT};
-    out->lx=(uint8_t)(((int)SDL_GetGamepadAxis(sdl_pad,SDL_GAMEPAD_AXIS_LEFTX)+32768)>>8);
-    out->ly=(uint8_t)(((int)SDL_GetGamepadAxis(sdl_pad,SDL_GAMEPAD_AXIS_LEFTY)+32768)>>8);
-    out->rx=(uint8_t)(((int)SDL_GetGamepadAxis(sdl_pad,SDL_GAMEPAD_AXIS_RIGHTX)+32768)>>8);
-    out->ry=(uint8_t)(((int)SDL_GetGamepadAxis(sdl_pad,SDL_GAMEPAD_AXIS_RIGHTY)+32768)>>8);
-    int l=SDL_GetGamepadAxis(sdl_pad,SDL_GAMEPAD_AXIS_LEFT_TRIGGER),r=SDL_GetGamepadAxis(sdl_pad,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    out->lx=(uint8_t)(((int)s.axes[SDL_GAMEPAD_AXIS_LEFTX]+32768)>>8);
+    out->ly=(uint8_t)(((int)s.axes[SDL_GAMEPAD_AXIS_LEFTY]+32768)>>8);
+    out->rx=(uint8_t)(((int)s.axes[SDL_GAMEPAD_AXIS_RIGHTX]+32768)>>8);
+    out->ry=(uint8_t)(((int)s.axes[SDL_GAMEPAD_AXIS_RIGHTY]+32768)>>8);
+    int l=s.axes[SDL_GAMEPAD_AXIS_LEFT_TRIGGER],r=s.axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER];
     const uint8_t lt=(uint8_t)(l>0?l*255/32767:0),rt=(uint8_t)(r>0?r*255/32767:0);
     int pressed[SRC_COUNT];
-    for(int i=0;i<SRC_COUNT;++i)pressed[i]=i==SRC_LT?lt>30:i==SRC_RT?rt>30:SDL_GetGamepadButton(sdl_pad,buttons[i]);
-    const SDL_GamepadType type=SDL_GetGamepadType(sdl_pad);
+    for(int i=0;i<SRC_COUNT;++i)pressed[i]=i==SRC_LT?lt>30:i==SRC_RT?rt>30:buttons[i]>=0&&(int)buttons[i]<64&&((s.buttons>>buttons[i])&1);
+    const SDL_GamepadType type=s.type;
     apply_map(type==SDL_GAMEPAD_TYPE_PS4||type==SDL_GAMEPAD_TYPE_PS5?playstation_map:pad_map,pressed,lt,rt,
-              SDL_GamepadHasSensor(sdl_pad,SDL_SENSOR_GYRO),out,contacts,xy);
-    if(SDL_GetGamepadButton(sdl_pad,SDL_GAMEPAD_BUTTON_TOUCHPAD))out->buttons|=0x100000;
+              s.has_gyro,out,contacts,xy);
+    if((s.buttons>>SDL_GAMEPAD_BUTTON_TOUCHPAD)&1)out->buttons|=0x100000;
     // A finger on any touchpad (the Steam Controller's two trackpads too) is the controller in use.
-    pad_touching=0;
-    for(int t=0;t<SDL_GetNumGamepadTouchpads(sdl_pad);++t)for(int i=0;i<SDL_GetNumGamepadTouchpadFingers(sdl_pad,t);++i){bool down=false;
-        if(SDL_GetGamepadTouchpadFinger(sdl_pad,t,i,&down,NULL,NULL,NULL)&&down)pad_touching=1;}
-    if(SDL_GetNumGamepadTouchpads(sdl_pad)>0){int fingers=SDL_GetNumGamepadTouchpadFingers(sdl_pad,0);
-        for(int i=0;i<2&&i<fingers;++i){bool down=false;float x=0,y=0,pressure=0;
-            if(SDL_GetGamepadTouchpadFinger(sdl_pad,0,i,&down,&x,&y,&pressure)&&down){contacts[i]=1;xy[i][0]=touch_coord(x,1919);xy[i][1]=touch_coord(y,941);}}}
-    float gyro[3]={0},accel[3]={0,SDL_STANDARD_GRAVITY,0};
-    SDL_GetGamepadSensorData(sdl_pad,SDL_SENSOR_GYRO,gyro,3);SDL_GetGamepadSensorData(sdl_pad,SDL_SENSOR_ACCEL,accel,3);
-    for(int i=0;i<3;++i){out->angular[i]=isfinite(gyro[i])?gyro[i]:0;out->acceleration[i]=isfinite(accel[i])?accel[i]/SDL_STANDARD_GRAVITY:0;}
+    pad_touching=s.any_finger;
+    for(int i=0;i<2&&i<s.fingers;++i)if(s.finger[i].down){contacts[i]=1;xy[i][0]=touch_coord(s.finger[i].x,1919);xy[i][1]=touch_coord(s.finger[i].y,941);}
+    for(int i=0;i<3;++i){out->angular[i]=isfinite(s.gyro[i])?s.gyro[i]:0;out->acceleration[i]=isfinite(s.accel[i])?s.accel[i]/SDL_STANDARD_GRAVITY:0;}
     uint64_t now=SDL_GetTicksNS();float dt=sensor_tick?(float)((double)(now-sensor_tick)/1e9):0;sensor_tick=now;
-    if(accel_gain!=1)pad_accel_gain(out->acceleration,gravity,accel_gain,dt<0.1f?dt:0);
+    if(s.accel_gain!=1)pad_accel_gain(out->acceleration,gravity,s.accel_gain,dt<0.1f?dt:0);
     // Same q * angular-velocity convention as shadPS4 input/controller.cpp (GPL-2.0-or-later).
     if(dt>0&&dt<0.1f){float x=quaternion[0],y=quaternion[1],z=quaternion[2],w=quaternion[3];
         float gx=out->angular[0]*dt*.5f,gy=out->angular[1]*dt*.5f,gz=out->angular[2]*dt*.5f;
@@ -293,9 +384,12 @@ static void set_mouse_mode(int mode,HWND window){
 static uint8_t axis(int16_t v){return (uint8_t)(((int)v+32768)>>8);}
 static int32_t error(unsigned n){return (int32_t)(UINT32_C(0x80920000)|n);}
 static int32_t GUEST_ABI pad_init(void){
-    if(!initialized){SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4,"1");
-        sdl_ready=SDL_InitSubSystem(SDL_INIT_GAMEPAD);if(sdl_ready){SDL_SetGamepadEventsEnabled(false);SDL_SetJoystickEventsEnabled(false);}
-        else fprintf(stderr,"PAD SDL init failed, using XInput: %s\n",SDL_GetError());}
+    if(!initialized){pad_thread_mode=option_on("ISS_PAD_THREAD");
+        if(pad_thread_mode){pad_init_done=CreateEventW(NULL,TRUE,FALSE,NULL);pad_wake=CreateEventW(NULL,FALSE,FALSE,NULL);
+            HANDLE thread=pad_init_done&&pad_wake?CreateThread(NULL,0,pad_io_main,NULL,0,NULL):NULL;
+            if(thread){WaitForSingleObject(pad_init_done,10000);CloseHandle(thread);}else pad_thread_mode=0;}
+        if(!pad_thread_mode)pad_sdl_init();
+        fprintf(stderr,"PAD io %s\n",pad_thread_mode?"thread (ISS:PadIO, 2 ms)":"inline");}
     if(!initialized)load_controls();
     initialized=1;return 0;
 }
@@ -411,7 +505,7 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
     if(!sdl&&!xinput)stick_spray=stick_chord=0; // unplugged: the stick it was aiming with is gone
     if(stick_spray!=stick_shown){stick_shown=stick_spray;fprintf(stderr,"PAD_STICK spray %s\n",stick_spray?"on":"off");
         if(stick_spray!=(mouse_mode==2))set_mouse_mode(stick_spray?2:0,game_window);else show_mode(game_window);
-        if(sdl_pad)SDL_RumbleGamepad(sdl_pad,0x6000,0x6000,stick_spray?250:100);}
+        if(sdl)request_rumble(0x6000,0x6000,stick_spray?250:100,1);}
     float stick_turn[2]={0,0},stick_dt=0;
     if(stick_spray){
         if(stick_recentre){stick_recentre=0;memcpy(spray,spray_pose,sizeof(spray));stick_tick=0;}
@@ -528,12 +622,12 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
 static int32_t GUEST_ABI pad_vibration(int handle,const uint8_t *motors){
     if(handle!=1||!opened)return error(3);if(!motors)return error(1);
     AcquireSRWLockExclusive(&lock);
-    if(sdl_pad)SDL_RumbleGamepad(sdl_pad,(Uint16)(motors[0]*257),(Uint16)(motors[1]*257),1000);
+    if(sdl_ready&&pad_connected)request_rumble((Uint16)(motors[0]*257),(Uint16)(motors[1]*257),1000,0);
     else{XINPUT_VIBRATION v={(WORD)(motors[0]*257),(WORD)(motors[1]*257)};XInputSetState(0,&v);}
     ReleaseSRWLockExclusive(&lock);return 0;
 }
 static uint8_t lightbar[4];
-static int32_t GUEST_ABI pad_light(int handle,const void *rgb){if(handle!=1||!opened)return error(3);if(!rgb)return error(1);AcquireSRWLockExclusive(&lock);memcpy(lightbar,rgb,4);if(sdl_pad)SDL_SetGamepadLED(sdl_pad,lightbar[0],lightbar[1],lightbar[2]);ReleaseSRWLockExclusive(&lock);return 0;}
+static int32_t GUEST_ABI pad_light(int handle,const void *rgb){if(handle!=1||!opened)return error(3);if(!rgb)return error(1);AcquireSRWLockExclusive(&lock);memcpy(lightbar,rgb,4);if(sdl_ready)request_led(lightbar);ReleaseSRWLockExclusive(&lock);return 0;}
 uintptr_t pad_resolve(const char *identity){
     if(!strstr(identity,"#libScePad#1#libScePad#257"))return 0;const char *api=runtime_api_name(identity);
 #define API(n,f) if(!strcmp(api,n))return (uintptr_t)f

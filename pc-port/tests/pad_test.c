@@ -47,6 +47,9 @@ int main(int argc,char **argv){
     SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_PS4,"0",SDL_HINT_OVERRIDE);
     SDL_SetHint(SDL_HINT_JOYSTICK_DIRECTINPUT,"0");SDL_SetHint(SDL_HINT_JOYSTICK_WGI,"0");SDL_SetHint("SDL_XINPUT_ENABLED","0");}
     if(!monitor)_putenv("ISS_PAD_MAP=guide=options");
+    // The contract below reads right after each change: the inline path (ISS_PAD_THREAD=0). The
+    // I/O thread serves the same snapshot, at most 2 ms old.
+    if(!monitor)_putenv("ISS_PAD_THREAD=0");
     Init init=(Init)pad_resolve("hv1luiJrqQM#libScePad#1#libScePad#257");
     Open open=(Open)pad_resolve("xk0AcarP3V4#libScePad#1#libScePad#257");
     Read read=(Read)pad_resolve("YndgXqQVV7c#libScePad#1#libScePad#257");CHECK(init&&open&&read);CHECK(init()==0);
