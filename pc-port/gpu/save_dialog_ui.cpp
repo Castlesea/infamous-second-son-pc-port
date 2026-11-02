@@ -51,6 +51,14 @@ struct State {
     std::deque<Input> inputs;
     Pointer pointer;
     bool pad_used = true;
+    // The mouse takes over from the controller only when it really moves (6 pixels from where it
+    // was at the last controller press, and not within 0.75 s of it): sensor jitter, a resting
+    // cursor and the port's own cursor moves (spray mode, mouse touchpad) left the selection
+    // stuck under the cursor and the controller seemingly disconnected (2026-11-01). A row or
+    // button under the cursor is selected when the cursor enters it, not on every frame.
+    double pad_press_at = -1;
+    float anchor_x = -1, anchor_y = -1;
+    int hover = -1;
     // Repeats of held directions (controller stick and D-pad, keyboard has its own repeat).
     int held_dir = 0;       // -1 up, +1 down, 0 none
     double held_next = 0;
@@ -215,6 +223,7 @@ void DrawList(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float alpha
     s.scroll += (target_scroll - s.scroll) * ease;
     s.focus_y += (focus_top - s.focus_y) * (1.0f - std::exp(-dt * 20.0f));
 
+    int hovered = -1;
     dl->PushClipRect(la, lb, true);
     // The sliding selection: a glow, a lighter body and a bright border.
     {
@@ -259,7 +268,8 @@ void DrawList(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float alpha
         // Mouse: hover focuses, click chooses.
         if (s.pointer.x >= r0.x && s.pointer.x <= r1.x && s.pointer.y >= std::max(r0.y, la.y) &&
             s.pointer.y <= std::min(r1.y, lb.y)) {
-            if (!s.pad_used) s.focus = i;
+            hovered = i;
+            if (!s.pad_used && s.hover != i) s.focus = i;
             if (s.pointer.clicked) {
                 s.focus = i;
                 Finish(s, false);
@@ -267,6 +277,7 @@ void DrawList(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float alpha
         }
     }
     dl->PopClipRect();
+    s.hover = hovered;
     // A scroll bar when the list does not fit.
     const float content = n * (row_h + gap) - gap;
     if (content > view_h) {
@@ -301,10 +312,12 @@ void DrawMessage(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float al
     const float total = n * bw + (n - 1) * spacing;
     float x = (a.x + b.x - total) / 2;
     const float y = b.y - 64 * k - bh - 34 * k;
+    int hovered_button = -1;
     for (int i = 0; i < n; ++i) {
         const ImVec2 r0(x, y), r1(x + bw, y + bh);
         const bool hover = s.pointer.x >= r0.x && s.pointer.x <= r1.x && s.pointer.y >= r0.y && s.pointer.y <= r1.y;
-        if (hover && !s.pad_used) s.focus = i;
+        if (hover) hovered_button = i;
+        if (hover && !s.pad_used && s.hover != i) s.focus = i;
         const bool focused = s.focus == i;
         dl->AddRectFilled(r0, r1, focused ? Col(240, 246, 255, alpha) : Col(255, 255, 255, 0.10f * alpha), bh / 2);
         if (!focused) dl->AddRect(r0, r1, Col(255, 255, 255, 0.25f * alpha), bh / 2, 0, 1.5f * k);
@@ -317,6 +330,7 @@ void DrawMessage(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float al
         }
         x += bw + spacing;
     }
+    s.hover = hovered_button;
 }
 
 // Controllers, read every frame: the game's pad code (src/pad.c) turns SDL's gamepad events off,
@@ -379,6 +393,9 @@ void PollPads(State& s) {
         if (pressed & bit) {
             s.inputs.push_back(in);
             s.pad_used = true;
+            s.pad_press_at = Now();
+            s.anchor_x = s.pointer.x;
+            s.anchor_y = s.pointer.y;
         }
     };
     fire(PadUp, Input::Up);
@@ -445,6 +462,9 @@ bool OnEvent(const SDL_Event& e) {
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         s.pad_used = true;
+        s.pad_press_at = Now();
+        s.anchor_x = s.pointer.x;
+        s.anchor_y = s.pointer.y;
         switch (e.gbutton.button) {
         case SDL_GAMEPAD_BUTTON_DPAD_UP: s.inputs.push_back(Input::Up); s.dpad_up = true; s.held_dir = -1; s.held_next = Now() + 0.4; break;
         case SDL_GAMEPAD_BUTTON_DPAD_DOWN: s.inputs.push_back(Input::Down); s.dpad_down = true; s.held_dir = 1; s.held_next = Now() + 0.4; break;
@@ -497,7 +517,12 @@ bool OnEvent(const SDL_Event& e) {
         }
         s.pointer.x = e.motion.x * sx;
         s.pointer.y = e.motion.y * sy;
-        s.pad_used = false;
+        if (s.anchor_x < 0) { s.anchor_x = s.pointer.x; s.anchor_y = s.pointer.y; }
+        const float mx = s.pointer.x - s.anchor_x, my = s.pointer.y - s.anchor_y;
+        if (s.pad_used && Now() - s.pad_press_at > 0.75 && mx * mx + my * my >= 36.0f) {
+            s.pad_used = false;
+            s.hover = -1; // the row or button now under the cursor takes the selection
+        }
         return true;
     }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -587,6 +612,9 @@ extern "C" __declspec(dllexport) int iss_gpu_dialog_open(const IssDialog* d) {
     s.opened_at = iss::save_ui::Now();
     s.inputs.clear();
     s.pointer = {};
+    s.hover = -1;
+    s.anchor_x = s.anchor_y = -1;
+    s.pad_press_at = -1;
     s.held_dir = 0;
     s.finished = false;
     s.open = true;
