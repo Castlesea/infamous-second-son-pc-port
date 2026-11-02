@@ -37,6 +37,7 @@ struct Globals {
     const Instance* instance{};
     Scheduler* scheduler{};
     VideoCore::BufferCache* buffer_cache{};
+    const VideoCore::TextureCache* texture_cache{}; ///< NativeMaterial::HandlesAlive
     std::atomic<const VideoCore::Buffer*> unified{};
     std::atomic<VAddr> unified_base{};
     std::atomic<bool> ready{};
@@ -525,6 +526,7 @@ static ng::Recording* RecordBatch(const ng::Batch& b, const ng::RangeStart& star
             NativeMaterial::Touch(*t);
             if (t->pipeline != shape && !InstallViews(*t->pipeline, regs, views, num_views))
                 return fail(MissState);
+            if (!NativeMaterial::HandlesAlive(*g.texture_cache, *t)) return fail(MissState);
         }
         const auto* pipeline = t->pipeline;
         if (!pipeline->IsReady() ||
@@ -764,6 +766,7 @@ void Rasterizer::NativeRecorderSetup() {
     g.instance = &instance;
     g.scheduler = &scheduler;
     g.buffer_cache = &buffer_cache;
+    g.texture_cache = &texture_cache;
     Shader::Info::ud_snapshots_used.store(true, std::memory_order_relaxed);
     g.ready.store(true, std::memory_order_release);
     ng::SetRecorder(&RecordBatch, &Link);

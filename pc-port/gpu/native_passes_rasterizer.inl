@@ -23,6 +23,7 @@ struct Globals {
     Scheduler* scheduler{};
     VideoCore::BufferCache* buffer_cache{};
     PipelineCache* pipeline_cache{}; ///< speculative compute translations (ISS_SPEC_COMPUTE)
+    const VideoCore::TextureCache* texture_cache{}; ///< NativeMaterial::HandlesAlive
     std::atomic<const VideoCore::Buffer*> unified{};
     std::atomic<VAddr> unified_base{};
     std::atomic<bool> ready{};
@@ -966,6 +967,9 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
         NativeMaterial::Touch(*t);
         if (t->pipeline != shape && !NativeRecorder::InstallViews(*t->pipeline, regs, views, num_views))
             return miss(MissViews);
+        // Its textures and samplers before their handles are pushed (the command processor
+        // draws it and drops the stale template).
+        if (!NativeMaterial::HandlesAlive(*g.texture_cache, *t)) return miss(MissViews);
     }
     const auto* pipeline = t->pipeline;
     if (!pipeline->IsReady() || (!pipeline->UsesPushDescriptors() && !NativeMaterial::SetsEnabled()))
@@ -1470,6 +1474,7 @@ void Rasterizer::NativePassesSetup() {
     g.scheduler = &scheduler;
     g.buffer_cache = &buffer_cache;
     g.pipeline_cache = &pipeline_cache;
+    g.texture_cache = &texture_cache;
     Shader::Info::ud_snapshots_used.store(true, std::memory_order_relaxed);
     g.ready.store(true, std::memory_order_release);
     const auto& regs = DrawRegs();

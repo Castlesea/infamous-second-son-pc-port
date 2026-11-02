@@ -1878,6 +1878,10 @@ void TextureCache::ReportDoubleFree(ImageId image_id, const std::source_location
 }
 
 void TextureCache::DeleteImage(ImageId image_id) {
+    // A remembered (id, generation) must not match the image a reused slot holds next: the
+    // native recorders check it lock free before handing remembered view handles to the driver
+    // (NativeMaterial::HandlesAlive). Its views are destroyed below, a GPU tick later.
+    BumpImageGeneration(image_id);
     Image& image = slot_images[image_id];
     iss::blackbox::ImageDeleted(image.image_uid, image.info.guest_address);
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");

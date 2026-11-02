@@ -362,6 +362,26 @@ static bool TexturesValid(VideoCore::TextureCache& cache, const T& t, bool& stal
     t.cache_generation.store(generation, std::memory_order_relaxed);
     return true;
 }
+
+// Whether the image views and samplers a template remembers can still be handed to the driver,
+// lock free, on any thread (the engine threads record before the command processor validates
+// with TexturesValid). An image deleted (DeleteImage bumps its generation, its views go a GPU
+// tick later) or written since the template was learned, or a sampler collected, fails it; such
+// a segment was rejected anyway when executed, but recording it pushed the freed handles first:
+// vkCmdPushDescriptorSetKHR reads the view and sampler objects at once (NVIDIA: an access
+// violation in nvoglv64.dll once their memory is unmapped, 2026-10-31).
+static bool HandlesAlive(const VideoCore::TextureCache& cache, const Template& t) {
+    if (t.has_samplers && cache.SamplersGeneration() != t.samplers_generation) return false;
+    for (const auto& cap : t.images) {
+        if (!cap.id) continue;
+        if (cap.id.index >= (1u << 16)) { // TextureCache::NumImageGens: no per-image generation
+            if (cache.Generation() != t.cache_generation.load(std::memory_order_relaxed)) return false;
+            continue;
+        }
+        if (cache.ImageGeneration(cap.id) != cap.generation) return false;
+    }
+    return true;
+}
 } // namespace NativeMaterial
 
 const Rasterizer::NativeMaterialTemplate* Rasterizer::NativeMaterialFind(u64 state_key) {
