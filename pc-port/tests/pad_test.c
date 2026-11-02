@@ -23,6 +23,14 @@ static void spray_test(void){
     pad_spray_step(q,0,0,.01f,1,1.0/24,w,a);CHECK(a[0]>1.5f);
 }
 void pad_accel_gain(float accel[3],float gravity[3],float gain,float dt);
+int pad_cursor_wakes(int dx,int dy,int pressed,unsigned long long still_ms);
+// The cursor comes back only for real keyboard or mouse use: 6 px of motion or a press, once the
+// controller has been still for half a second (not for input Windows counts on its own).
+static void cursor_test(void){
+    CHECK(!pad_cursor_wakes(0,0,0,10000));CHECK(!pad_cursor_wakes(3,4,0,10000));CHECK(!pad_cursor_wakes(-5,0,0,10000));
+    CHECK(pad_cursor_wakes(6,0,0,10000));CHECK(pad_cursor_wakes(0,-6,0,10000));CHECK(pad_cursor_wakes(0,0,1,600));
+    CHECK(!pad_cursor_wakes(50,0,1,400));CHECK(!pad_cursor_wakes(0,0,1,500));
+}
 // A Steam Controller (+-2 G) held on its side and shaken at 5 Hz clips at 2 G; with the gain the
 // shake reaches past it as on a DualShock 4, and held still it reads gravity as measured.
 static void accel_gain_test(void){
@@ -123,7 +131,7 @@ int main(int argc,char **argv){
     CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,32767));CHECK(read(1,data)==0);
     CHECK(data[6]==255&&fabsf(scalar(data,24)-1)<.001f);
     SDL_CloseJoystick(joystick);CHECK(SDL_DetachVirtualJoystick(id));
-    spray_test();accel_gain_test();
-    puts("PASS: SDL DS4 buttons, axes, two independent touch contacts, release, sensors, quaternion, disconnect, PlayStation and Xbox layouts, the F7 spray can, the accelerometer gain, the right stick swipes and spray can.");
+    spray_test();accel_gain_test();cursor_test();
+    puts("PASS: SDL DS4 buttons, axes, two independent touch contacts, release, sensors, quaternion, disconnect, PlayStation and Xbox layouts, the F7 spray can, the accelerometer gain, the right stick swipes and spray can., and the cursor waking only for real mouse or key use.");
     return 0;
 }
