@@ -199,12 +199,13 @@ const PadName kPadTargets[] = {
     {"triangle", L"Triangle"}, {"l1", L"L1"}, {"r1", L"R1"}, {"l2", L"L2"}, {"r2", L"R2"},
     {"l3", L"L3"}, {"r3", L"R3"}, {"options", L"Options"}, {"ps", L"PS button"},
     {"up", L"D-pad up"}, {"down", L"D-pad down"}, {"left", L"D-pad left"}, {"right", L"D-pad right"},
-    {"touch", L"Touchpad press"}, {"touch_left", L"Touchpad left"}, {"touch_right", L"Touchpad right"},
+    {"touch", L"Touchpad press"}, {"touch_left", L"Touchpad left"}, {"touch_right", L"Touchpad right"}, {"touch_both", L"Touchpad both sides"},
     {"swipe_up", L"Swipe up"}, {"swipe_down", L"Swipe down"}, {"swipe_left", L"Swipe left"},
     {"swipe_right", L"Swipe right"}};
 constexpr int kPadSourceCount = int(std::size(kPadSources)), kPadTargetCount = int(std::size(kPadTargets));
-// Recommended: the PS4 layout one to one; View / Menu press the left / right side of the touchpad.
-const int kRecommendedPadMap[kPadSourceCount] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 19, 12, 0, 13, 14, 15, 16};
+// Recommended: the PS4 layout one to one; Menu is Options (pause), View presses the touchpad on
+// both sides (View + D-pad left / right: that side only; src/pad.c touch_both).
+const int kRecommendedPadMap[kPadSourceCount] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 11, 12, 0, 13, 14, 15, 16};
 int g_pad_map[kPadSourceCount];
 
 bool PadMapRecommended() { return std::equal(std::begin(g_pad_map), std::end(g_pad_map), std::begin(kRecommendedPadMap)); }
@@ -1626,10 +1627,9 @@ void Paint(HDC hdc, int width, int height) {
             g_spots.push_back({RectF(cx - S(10), ry - S(3), col_w, row_h - S(1)), id});
         }
         const float ey = rows_y + 9 * row_h + S(8);
-        g.DrawString(L"Recommended: the PS4 layout one to one; View and Menu press the left and right side of the "
-                     L"touchpad. The game asks for the touchpad in fast gameplay moments (absorbing powers, finishers, "
-                     L"prompts), so it stays under your thumbs instead of on the keyboard. Options (pause): Esc, or give "
-                     L"it a button here.\n"
+        g.DrawString(L"Recommended: the PS4 layout one to one; Menu pauses (Options) and View presses the touchpad "
+                     L"with a finger on each side, which meets the game's left, right, middle and both-sides prompts "
+                     L"(absorbing powers, finishers, lifting cars). View + D-pad left / right presses that side only.\n"
                      L"In game, F5 opens the touchpad & spray window (the ? at the top right tells the keys).",
                      -1, &hint, RectF(left, ey, S(800), S(76)), nullptr, &dim_brush);
         const float by = ey + S(74);
@@ -1803,7 +1803,8 @@ void Paint(HDC hdc, int width, int height) {
                 L"ends it.\n\n"
                 L"Keyboard: Space / Backspace press the left / right side of the touchpad, F8 both, 1-4 swipe.\n\n"
                 L"Controller without a gyro: L3+R3 holds it as the spray can with F7 (right stick aims, A shakes, RB "
-                L"recenters, R2 sprays). Hold View and push the right stick to swipe the touchpad.",
+                L"recenters, R2 sprays). Hold View and push the right stick to swipe the touchpad; View + D-pad left / "
+                L"right touches that side only.",
                 -1, &hint, RectF(box.X + S(16), box.Y + S(36), box.Width - S(32), box.Height - S(44)), nullptr,
                 &text_brush);
         }
