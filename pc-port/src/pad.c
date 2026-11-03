@@ -65,16 +65,18 @@ enum {SRC_A,SRC_B,SRC_X,SRC_Y,SRC_LB,SRC_RB,SRC_LT,SRC_RT,SRC_LS,SRC_RS,SRC_VIEW
 static const char *const source_names[SRC_COUNT]={"a","b","x","y","lb","rb","lt","rt","ls","rs","view","menu","guide","share",
     "up","down","left","right"};
 enum {T_NONE,T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_OPTIONS,T_PS,T_UP,T_DOWN,T_LEFT,T_RIGHT,
-      T_TOUCH,T_TOUCH_LEFT,T_TOUCH_RIGHT,T_SWIPE_UP,T_SWIPE_DOWN,T_SWIPE_LEFT,T_SWIPE_RIGHT,T_COUNT};
+      T_TOUCH,T_TOUCH_LEFT,T_TOUCH_RIGHT,T_TOUCH_BOTH,T_SWIPE_UP,T_SWIPE_DOWN,T_SWIPE_LEFT,T_SWIPE_RIGHT,T_COUNT};
 // L2/R2 carry the trigger's analog value; their button bits follow it (pad_read, above 30).
 static const struct {const char *name;uint32_t bit;} targets[T_COUNT]={{"none",0},{"cross",0x4000},{"circle",0x2000},
     {"square",0x8000},{"triangle",0x1000},{"l1",0x400},{"r1",0x800},{"l2",0},{"r2",0},{"l3",2},{"r3",4},{"options",8},
     {"ps",0x10000},{"up",0x10},{"down",0x40},{"left",0x80},{"right",0x20},{"touch",0x100000},{"touch_left",0x100000},
-    {"touch_right",0x100000},{"swipe_up",0},{"swipe_down",0},{"swipe_left",0},{"swipe_right",0}};
-// Recommended (the user's layout, 2026-10-19): the PS4 layout one to one, and View / Menu press
-// the left / right side of the touchpad, under the thumbs for the game's quick touchpad prompts.
-static uint8_t pad_map[SRC_COUNT]={T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_TOUCH_LEFT,
-    T_TOUCH_RIGHT,T_PS,T_NONE,T_UP,T_DOWN,T_LEFT,T_RIGHT};
+    {"touch_right",0x100000},{"touch_both",0x100000},{"swipe_up",0},{"swipe_down",0},{"swipe_left",0},{"swipe_right",0}};
+// Recommended (2026-11-02): the PS4 layout one to one, Menu is Options (the pause menu) and View
+// presses the touchpad with a finger on each side (touch_both: a prompt for the left side, the
+// right side, the middle or both, such as lifting a car, is met by one press). View + D-pad left /
+// right presses that side only (the D-pad press is not passed on).
+static uint8_t pad_map[SRC_COUNT]={T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_TOUCH_BOTH,
+    T_OPTIONS,T_PS,T_NONE,T_UP,T_DOWN,T_LEFT,T_RIGHT};
 static const uint8_t playstation_map[SRC_COUNT]={T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_NONE,
     T_OPTIONS,T_PS,T_NONE,T_UP,T_DOWN,T_LEFT,T_RIGHT};
 // The keyboard's touchpad shortcuts (launcher TOUCHPAD SHORTCUTS, ISS_TOUCH_KEYS="touch_left=32,..."
@@ -153,7 +155,10 @@ static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],
     can_gyro_shake=gyro&&stick_shake;
     if(stick_spray){stick_aim[0]=sx;stick_aim[1]=sy;out->rx=out->ry=128;}
     int touch_held=0;
-    for(int i=0;i<SRC_COUNT;++i)if(held[i]&&map[i]>=T_TOUCH&&map[i]<=T_TOUCH_RIGHT)touch_held=1;
+    for(int i=0;i<SRC_COUNT;++i)if(held[i]&&map[i]>=T_TOUCH&&map[i]<=T_TOUCH_BOTH)touch_held=1;
+    // A touchpad button held with D-pad left / right: that side only (touch_both).
+    int touch_side=0;
+    if(touch_held){if(held[SRC_LEFT]){touch_side=-1;held[SRC_LEFT]=0;}else if(held[SRC_RIGHT]){touch_side=1;held[SRC_RIGHT]=0;}}
     if(swipe_option&&touch_held&&!stick_spray){const float ax=fabsf(sx),ay=fabsf(sy),m=ax>ay?ax:ay;
         if(swipe_armed&&m>.6f){pad_swipe=ay>=ax?(sy<0?0:1):(sx<0?2:3);swipe_armed=0;swipe_latched=1;}
         if(m<.3f)swipe_armed=1;
@@ -165,11 +170,13 @@ static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],
         const uint8_t amount=i==SRC_LT?lt:i==SRC_RT?rt:(down?255:0);
         if(t==T_L2&&amount>out->l2)out->l2=amount;
         if(t==T_R2&&amount>out->r2)out->r2=amount;
-        if(!down||(swipe_latched&&t>=T_TOUCH&&t<=T_TOUCH_RIGHT))continue;
+        if(!down||(swipe_latched&&t>=T_TOUCH&&t<=T_TOUCH_BOTH))continue;
         out->buttons|=targets[t].bit;
         if(t==T_TOUCH){contacts[0]=1;xy[0][0]=960;xy[0][1]=471;}
         if(t==T_TOUCH_LEFT){contacts[0]=1;xy[0][0]=480;xy[0][1]=471;}
         if(t==T_TOUCH_RIGHT){contacts[1]=1;xy[1][0]=1440;xy[1][1]=471;}
+        if(t==T_TOUCH_BOTH){if(touch_side<=0){contacts[0]=1;xy[0][0]=480;xy[0][1]=471;}
+            if(touch_side>=0){contacts[1]=1;xy[1][0]=1440;xy[1][1]=471;}}
     }
 }
 // The spray can is shaken harder than 2 G, which a DualShock 4 (+-4 G) measures and Valve's
