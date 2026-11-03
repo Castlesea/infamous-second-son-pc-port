@@ -84,12 +84,27 @@ static const char *const touch_key_names[K_COUNT]={"touch_left","touch_right","t
     "swipe_down","swipe_left","swipe_right","mouse_touchpad","spray","panel"};
 static int touch_keys[K_COUNT]={VK_SPACE,VK_BACK,VK_F8,'T','1','2','3','4',VK_F6,VK_F7,VK_F5};
 static int pad_swipe=-1,source_was[SRC_COUNT];
-// Controllers without a gyro (ISS_PAD_STICK_SPRAY, default on): L3 and R3 pressed together start
-// the spray can of the graffiti missions and end it again (those presses are not passed on), with
-// the mouse's spray mode (F7). The controller is then held on its side like a can, the right stick
-// turns it as the mouse does (pad_read), A (cross) shakes it and RB recentres it; R2 sprays as
-// usual. Controllers with a gyro are the can themselves.
-static int stick_spray,stick_chord,stick_shake,stick_recentre,stick_rb_was;
+// The spray can of the graffiti missions (ISS_PAD_STICK_SPRAY, default on). L3 and R3 pressed
+// together (not passed on; the game gives the pair no action) are the can gesture:
+// - a controller without a gyro: the first press turns the controller on its side (0.35 s, as a
+//   hand would) and then shakes it (1.2 s), and from then on the right stick turns the can as the
+//   mouse does (pad_read) and R2 sprays, with the mouse's spray mode (F7). Every press again shakes
+//   it again. It ends by itself once the graffiti is over: when Delsin is walked (left stick past
+//   half for 0.5 s; he cannot walk while spraying) or after 8 s without R2 once it sprayed (30 s if
+//   it never did); B (Circle, still passed on) or L3 + R3 held for 0.8 s end it at once. Moving the
+//   right stick does not keep it (the camera stuck after a graffiti, 2026-11-02). A, RB and the
+//   other buttons stay the game's.
+// - a controller with a gyro is the can itself (it is turned by hand): the press shakes it (1.2 s).
+// A short rumble marks each shake; a longer one the can's start, a short one its end.
+#define CAN_TURN_S .35
+#define CAN_SHAKE_S 1.2
+#define CAN_EXIT_HOLD_S .8
+#define CAN_DONE_S 8.0
+#define CAN_UNUSED_S 30.0
+#define CAN_WALK_S .5
+static int stick_spray,stick_chord,stick_shake,stick_recentre,chord_in_can,chord_exit,stick_b_was,can_gyro_shake,can_pulse;
+static double can_turn_from=-1,can_shake_until=-1,chord_started,can_used,can_walk_from=-1;
+static int can_sprayed;
 static float stick_aim[2];
 // Swipes without a touchpad (ISS_PAD_STICK_SWIPE, default on): while a button that touches the
 // touchpad (View by default) is held, the right stick swipes it, once each time it is pushed past
@@ -114,13 +129,29 @@ static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],
     if(spray_option<0){spray_option=option_on("ISS_PAD_STICK_SPRAY");swipe_option=option_on("ISS_PAD_STICK_SWIPE");}
     int held[SRC_COUNT];memcpy(held,pressed,sizeof(held));
     const float sx=((float)out->rx-128)/127.f,sy=((float)out->ry-128)/127.f;
-    if(spray_option&&!gyro){
-        if(held[SRC_LS]&&held[SRC_RS]&&!stick_chord){stick_chord=1;stick_spray=!stick_spray;stick_recentre=1;}
-        if(stick_chord){if(!held[SRC_LS]&&!held[SRC_RS])stick_chord=0;held[SRC_LS]=held[SRC_RS]=0;}
-    }else stick_spray=stick_chord=0;
-    stick_shake=0;
-    if(stick_spray){stick_shake=held[SRC_A];if(held[SRC_RB]&&!stick_rb_was)stick_recentre=1;stick_rb_was=held[SRC_RB];
-        held[SRC_A]=held[SRC_RB]=0;stick_aim[0]=sx;stick_aim[1]=sy;out->rx=out->ry=128;}
+    const double now=(double)out->timestamp/1e6;
+    if(spray_option){
+        const int both=held[SRC_LS]&&held[SRC_RS];
+        if(both&&!stick_chord){stick_chord=1;chord_started=now;chord_in_can=stick_spray;can_used=now;
+            if(!gyro&&!stick_spray){stick_spray=1;stick_recentre=1;can_sprayed=0;can_walk_from=-1;can_turn_from=now;can_shake_until=now+CAN_TURN_S+CAN_SHAKE_S;}
+            else{can_shake_until=now+CAN_SHAKE_S;can_pulse=1;}}
+        if(stick_chord){
+            if(both&&chord_in_can&&stick_spray&&!chord_exit&&now-chord_started>=CAN_EXIT_HOLD_S){stick_spray=0;chord_exit=1;can_shake_until=-1;}
+            if(!held[SRC_LS]&&!held[SRC_RS])stick_chord=chord_exit=0;
+            held[SRC_LS]=held[SRC_RS]=0;}
+    }else stick_spray=stick_chord=0,can_shake_until=-1;
+    if(gyro)stick_spray=0;
+    if(stick_spray&&held[SRC_B]&&!stick_b_was){stick_spray=0;can_shake_until=-1;}
+    stick_b_was=held[SRC_B];
+    if(stick_spray&&(held[SRC_RT]||rt>30)){can_used=now;can_sprayed=1;}
+    if(stick_spray){const float lx=((float)out->lx-128)/127.f,ly=((float)out->ly-128)/127.f;
+        if(lx*lx+ly*ly>.25f){if(can_walk_from<0)can_walk_from=now;}else can_walk_from=-1;
+        if((can_walk_from>=0&&now-can_walk_from>=CAN_WALK_S)||now-can_used>(can_sprayed?CAN_DONE_S:CAN_UNUSED_S)){
+            stick_spray=0;can_shake_until=-1;can_walk_from=-1;}}
+    // The shake follows the turn on its side.
+    stick_shake=now<can_shake_until&&!(stick_spray&&now<can_turn_from+CAN_TURN_S);
+    can_gyro_shake=gyro&&stick_shake;
+    if(stick_spray){stick_aim[0]=sx;stick_aim[1]=sy;out->rx=out->ry=128;}
     int touch_held=0;
     for(int i=0;i<SRC_COUNT;++i)if(held[i]&&map[i]>=T_TOUCH&&map[i]<=T_TOUCH_RIGHT)touch_held=1;
     if(swipe_option&&touch_held&&!stick_spray){const float ax=fabsf(sx),ay=fabsf(sy),m=ax>ay?ax:ay;
@@ -506,11 +537,13 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
     if(stick_spray!=stick_shown){stick_shown=stick_spray;fprintf(stderr,"PAD_STICK spray %s\n",stick_spray?"on":"off");
         if(stick_spray!=(mouse_mode==2))set_mouse_mode(stick_spray?2:0,game_window);else show_mode(game_window);
         if(sdl)request_rumble(0x6000,0x6000,stick_spray?250:100,1);}
+    if(can_pulse){can_pulse=0;if(sdl)request_rumble(0x3000,0x3000,(Uint32)(CAN_SHAKE_S*1000),1);}
     float stick_turn[2]={0,0},stick_dt=0;
     if(stick_spray){
         if(stick_recentre){stick_recentre=0;memcpy(spray,spray_pose,sizeof(spray));stick_tick=0;}
         stick_dt=stick_tick?(float)(out->timestamp-stick_tick)/1e6f:0;stick_tick=out->timestamp;if(stick_dt>0.1f)stick_dt=0.1f;
-        for(int i=0;i<2;++i){const float a=fabsf(stick_aim[i]),v=a>.12f?(a-.12f)/.88f:0;stick_turn[i]=(stick_aim[i]<0?-v*v:v*v)*400*stick_speed*stick_dt;}
+        const int turning=(double)out->timestamp/1e6<can_turn_from+CAN_TURN_S;
+        for(int i=0;i<2;++i){const float a=fabsf(stick_aim[i]),v=a>.12f&&!turning?(a-.12f)/.88f:0;stick_turn[i]=(stick_aim[i]<0?-v*v:v*v)*400*stick_speed*stick_dt;}
     }
     if(mouse_mode==2&&cmd_now<cmd_aim_until){mouse_dx+=cmd_aim_dx;mouse_dy+=cmd_aim_dy;}
     if(mouse_mode==2){
@@ -527,6 +560,19 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         pad_spray_step(spray,stick_turn[0],stick_turn[1],stick_dt,stick_shake,(double)out->timestamp/1e6,out->angular,out->acceleration);
         memcpy(out->orientation,spray,sizeof(spray));
     }
+    // The can's turn on its side (L3 + R3, no gyro): upright to the can's pose about the
+    // controller's Z axis in CAN_TURN_S, with the gyro's rate; aiming waits for it.
+    {static int turn_final=1;const double turn=((double)out->timestamp/1e6-can_turn_from)/CAN_TURN_S;
+        if(stick_spray&&turn>=0&&turn<1){const float e=(float)(turn*turn*(3-2*turn)),half=.78539816f*e; // smoothstep, 0..pi/4
+            const float q[4]={0,0,sinf(half),cosf(half)},conj[4]={-q[0],-q[1],-q[2],q[3]},up[3]={0,1,0};
+            memcpy(spray,q,sizeof(spray));memcpy(out->orientation,q,sizeof(q));quat_rotate(conj,up,out->acceleration);
+            const float rate=(float)(1.5707963*6*turn*(1-turn)/CAN_TURN_S); // d(angle)/dt of the smoothstep
+            out->angular[0]=out->angular[1]=0;out->angular[2]=rate;turn_final=0;}
+        else if(stick_spray&&can_turn_from>=0&&turn>=1&&!turn_final){turn_final=1;memcpy(spray,spray_pose,sizeof(spray));}}
+    // A controller with a gyro: the chord's shake on top of its own motion (the F7 mode shakes in
+    // pad_spray_step).
+    if(can_gyro_shake&&mouse_mode!=2){const float phase=(float)(6.283185307*6.0*((double)out->timestamp/1e6));
+        out->acceleration[0]+=1.6f*sinf(phase);out->angular[2]+=4.0f*cosf(phase);}
 
     // ISS_PAD_REAL=0 (scripted runs): the real controller and keyboard are ignored, only the pad
     // script drives the game (a hand on the controller changed the route of A/B runs).
