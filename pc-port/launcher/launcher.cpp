@@ -129,6 +129,9 @@ std::vector<Setting> g_settings = {
      {{L"On", "1"}, {L"Off", "0"}}, TabGame},
     {"stick_swipe", L"Touchpad swipes on the right stick", L"Hold a touchpad button (View) and push the stick to swipe.",
      {{L"On", "1"}, {L"Off", "0"}}, TabGame},
+    // src/pad.c, the Mobile Command Center's core (ISS_PAD_CORE_HOLD, ISS_PAD_CORE_TURBO).
+    {"core_hold", L"Hold a swipe up (Command Center cores)", L"View + stick up, held: the finger stays up for you; press or hold R2. A, B, View or walking lets go.",
+     {{L"On, R2 held repeats", "1"}, {L"On, R2 as pressed", "notturbo"}, {L"Off", "0"}}, TabGame},
 };
 
 // The games the port runs. Each has its own files under user\ (its game folder, settings,
@@ -849,6 +852,9 @@ std::wstring LaunchGame(HWND notify) {
     env[L"ISS_LANGUAGE"] = Widen(SettingValue("language"));
     env[L"ISS_PAD_STICK_SPRAY"] = Widen(SettingValue("stick_spray"));
     env[L"ISS_PAD_STICK_SWIPE"] = Widen(SettingValue("stick_swipe"));
+    {const std::string core = SettingValue("core_hold");
+     env[L"ISS_PAD_CORE_HOLD"] = core == "0" ? L"0" : L"1";
+     env[L"ISS_PAD_CORE_TURBO"] = core == "notturbo" ? L"0" : L"1";}
     // Started from Steam, its Fossilize layer records every pipeline the game creates (thousands:
     // 300 MB in 30 s, ~100 ms per frame of pipeline creation and second-long stalls). The port
     // keeps its own pipeline cache, so the layer is turned off for the game.
@@ -1804,7 +1810,8 @@ void Paint(HDC hdc, int width, int height) {
                 L"Keyboard: Space / Backspace press the left / right side of the touchpad, F8 both, 1-4 swipe.\n\n"
                 L"Spray can: L3+R3 turns the controller on its side and shakes it; again to shake again. Without a "
                 L"gyro the right stick then aims and R2 sprays; B, L3+R3 held, walking or 8 s without spraying ends it. Hold View and push "
-                L"the right stick to swipe the touchpad; View + D-pad left / right touches that side only.",
+                L"the right stick to swipe the touchpad; keep it pushed up to hold the swipe (Command Center cores): "
+                L"then press or hold R2. View + D-pad left / right touches that side only.",
                 -1, &hint, RectF(box.X + S(16), box.Y + S(36), box.Width - S(32), box.Height - S(44)), nullptr,
                 &text_brush);
         }

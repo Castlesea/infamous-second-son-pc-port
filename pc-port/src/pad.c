@@ -113,6 +113,26 @@ static float stick_aim[2];
 // 60% and back under 30%, and does not turn the camera. That button's touch is let go from the
 // swipe until it is released, so the swipe does not end in a tap.
 static int swipe_armed=1,swipe_latched;
+// The Mobile Command Center's core (ISS_PAD_CORE_HOLD, default on): the game wants a swipe up held
+// at the top of the touchpad (it lifts the core; a lifted finger lets it drop) while R2 is pressed
+// again and again. A swipe up on the right stick (View held) that keeps the stick up for
+// CORE_LATCH_S, before the stroke ends, latches it: the finger stays at the top, the same contact,
+// with View and the stick let go, so the hand is free for R2. A quick flick stays a plain swipe.
+// While it is held, R2 held is pressed again and again for you (ISS_PAD_CORE_TURBO, default on:
+// CORE_TURBO_HZ, half of each period down); taps pass as they are. It lets go on B (Circle) or A
+// (Cross), both passed on, a new press of View (its touch not passed on), Delsin walked (left stick
+// past half for CORE_WALK_S), or CORE_DONE_S without R2 once it was pressed (CORE_UNUSED_S if never).
+#define CORE_LATCH_S .40
+#define CORE_TURBO_HZ 8.0
+#define CORE_WALK_S .5
+#define CORE_DONE_S 6.0
+#define CORE_UNUSED_S 15.0
+#define CORE_Y .15f // the end of the swipe up (pad_read's stroke), where the finger rests
+static int core_hold,core_option=-1,core_turbo=-1,core_touch_was,core_ab_was,core_pulse,core_r2_was,core_shown;
+static double core_flick_from=-1,core_used,core_walk_from=-1,core_r2_from;
+static int core_pressed;
+static void core_release(const char *why){if(!core_hold)return;core_hold=0;core_flick_from=core_walk_from=-1;core_pulse=-1;
+    fprintf(stderr,"PAD_CORE hold off (%s)\n",why);}
 static int option_on(const char *name){const char *s=getenv(name);return !s||s[0]!='0';}
 static void load_controls(void){
     const char *s=getenv("ISS_PAD_MAP");
@@ -159,11 +179,26 @@ static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],
     // A touchpad button held with D-pad left / right: that side only (touch_both).
     int touch_side=0;
     if(touch_held){if(held[SRC_LEFT]){touch_side=-1;held[SRC_LEFT]=0;}else if(held[SRC_RIGHT]){touch_side=1;held[SRC_RIGHT]=0;}}
+    if(core_option<0){core_option=option_on("ISS_PAD_CORE_HOLD");core_turbo=option_on("ISS_PAD_CORE_TURBO");}
+    // The core hold lets go (it was latched with View still held: only a new press counts).
+    if(core_hold){const int ab=held[SRC_A]||held[SRC_B];
+        if(ab&&!core_ab_was)core_release("A or B");
+        else if(touch_held&&!core_touch_was){core_release("View");swipe_latched=1;}
+        else if(stick_spray)core_release("spray can");
+        else{const float lx=((float)out->lx-128)/127.f,ly=((float)out->ly-128)/127.f;
+            if(lx*lx+ly*ly>.25f){if(core_walk_from<0)core_walk_from=now;else if(now-core_walk_from>=CORE_WALK_S)core_release("walked");}
+            else core_walk_from=-1;}}
+    core_touch_was=touch_held;core_ab_was=held[SRC_A]||held[SRC_B];
     if(swipe_option&&touch_held&&!stick_spray){const float ax=fabsf(sx),ay=fabsf(sy),m=ax>ay?ax:ay;
-        if(swipe_armed&&m>.6f){pad_swipe=ay>=ax?(sy<0?0:1):(sx<0?2:3);swipe_armed=0;swipe_latched=1;}
-        if(m<.3f)swipe_armed=1;
+        if(swipe_armed&&m>.6f){pad_swipe=ay>=ax?(sy<0?0:1):(sx<0?2:3);swipe_armed=0;swipe_latched=1;
+            core_flick_from=pad_swipe==0&&!core_hold?now:-1;}
+        if(m<.3f){swipe_armed=1;core_flick_from=-1;}
+        // Still pushed up when the stroke is nearly over: the core hold.
+        if(core_option&&core_flick_from>=0&&sy<-.6f&&now-core_flick_from>=CORE_LATCH_S){
+            core_hold=1;core_flick_from=-1;core_used=now;core_pressed=0;core_walk_from=-1;core_r2_was=0;core_pulse=1;
+            fprintf(stderr,"PAD_CORE hold on\n");}
         out->rx=out->ry=128;
-    }else{swipe_armed=1;if(!touch_held)swipe_latched=0;}
+    }else{swipe_armed=1;core_flick_from=-1;if(!touch_held)swipe_latched=0;}
     for(int i=0;i<SRC_COUNT;++i){const int t=map[i],down=held[i];
         if(down&&!source_was[i]&&t>=T_SWIPE_UP)pad_swipe=t-T_SWIPE_UP;
         source_was[i]=down;
@@ -404,9 +439,9 @@ static void refresh_cursor(HWND window){
 static void show_mode(HWND window){
     if(!window||(!base_title[0]&&!InternalGetWindowText(window,base_title,256)))return;
     wchar_t title[320];
-    swprintf(title,320,L"%ls%ls",base_title,mouse_mode==1?L"  [touchpad: mouse]":
+    swprintf(title,320,L"%ls%ls%ls",base_title,mouse_mode==1?L"  [touchpad: mouse]":
              mouse_mode==2?(stick_spray?L"  [spray: mouse and right stick]":L"  [spray: mouse]"):
-             stick_spray?L"  [spray: right stick]":L"");
+             stick_spray?L"  [spray: right stick]":L"",core_hold?L"  [touchpad: held up - press or hold R2]":L"");
     SendMessageTimeoutW(window,WM_SETTEXT,0,(LPARAM)title,SMTO_ABORTIFHUNG,50,NULL);
 }
 static void set_mouse_mode(int mode,HWND window){
@@ -545,6 +580,11 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         if(stick_spray!=(mouse_mode==2))set_mouse_mode(stick_spray?2:0,game_window);else show_mode(game_window);
         if(sdl)request_rumble(0x6000,0x6000,stick_spray?250:100,1);}
     if(can_pulse){can_pulse=0;if(sdl)request_rumble(0x3000,0x3000,(Uint32)(CAN_SHAKE_S*1000),1);}
+    // The core hold (apply_map): ends with the controller unplugged or after it went unused.
+    if(core_hold){if(!sdl&&!xinput)core_release("controller gone");
+        else if(cmd_now-core_used>(core_pressed?CORE_DONE_S:CORE_UNUSED_S))core_release("R2 unused");}
+    if(core_pulse){if(sdl)request_rumble(core_pulse>0?0x5000:0x2000,core_pulse>0?0x5000:0x2000,core_pulse>0?180:80,1);core_pulse=0;}
+    if(core_hold!=core_shown){core_shown=core_hold;show_mode(game_window);}
     float stick_turn[2]={0,0},stick_dt=0;
     if(stick_spray){
         if(stick_recentre){stick_recentre=0;memcpy(spray,spray_pose,sizeof(spray));stick_tick=0;}
@@ -584,13 +624,20 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
     // ISS_PAD_REAL=0 (scripted runs): the real controller and keyboard are ignored, only the pad
     // script drives the game (a hand on the controller changed the route of A/B runs).
     static int real_pad=-1;if(real_pad<0){const char *s=getenv("ISS_PAD_REAL");real_pad=!s||s[0]!='0';}
-    if(!real_pad){out->buttons=0;out->lx=out->ly=out->rx=out->ry=128;out->l2=out->r2=0;contacts[0]=contacts[1]=0;swipe_direction=-1;}
-    if(swipe_direction>=0){float t=(float)(out->timestamp-swipe_started)/450000.0f;out->buttons&=~UINT32_C(0x100000);
+    if(!real_pad){out->buttons=0;out->lx=out->ly=out->rx=out->ry=128;out->l2=out->r2=0;contacts[0]=contacts[1]=0;swipe_direction=-1;core_release("ISS_PAD_REAL=0");}
+    // The keyboard's swipe up (1) held past the stroke holds the finger at the top too.
+    const int key_core=focused&&swipe_direction==0&&swipe_keys[0]&&out->timestamp-swipe_started>=450000;
+    if(swipe_direction>=0&&!key_core){float t=(float)(out->timestamp-swipe_started)/450000.0f;out->buttons&=~UINT32_C(0x100000);
         if(t>=1){swipe_direction=-1;contacts[0]=contacts[1]=0;}else{
             float x=.5f,y=.5f;if(swipe_direction==0)y=.85f-.7f*t;if(swipe_direction==1)y=.15f+.7f*t;
             if(swipe_direction==2)x=.85f-.7f*t;if(swipe_direction==3)x=.15f+.7f*t;
             contacts[0]=1;contacts[1]=0;xy[0][0]=touch_coord(x,1919);xy[0][1]=touch_coord(y,941);out->buttons&=~UINT32_C(0x100000);}
     }
+    // The core hold: once the stroke is over the finger rests where it ended, the same contact
+    // (was_touch stays set, so its id does not change), with no click.
+    const int core_active=(core_hold&&swipe_direction<0)||key_core;
+    if(core_active){contacts[0]=1;contacts[1]=0;xy[0][0]=touch_coord(.5f,1919);xy[0][1]=touch_coord(CORE_Y,941);
+        out->buttons&=~UINT32_C(0x100000);}
     // ISS_PAD_SCRIPT=run (benchmarks): after ISS_PAD_SCRIPT_DELAY seconds of process time the
     // character runs forward, turning the camera for 2 s of every 12 and jumping every 3 s, so a
     // run measures the city while moving (streaming, changing shadow cascades) repeatably.
@@ -658,6 +705,13 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         if(seq[i].mask==0x100000&&!contacts[0]&&!contacts[1]){contacts[0]=1;xy[0][0]=960;xy[0][1]=471;}
         if(!seq[i].logged){seq[i].logged=1;fprintf(stderr,"PAD_SEQ %s at %.2f s\n",seq[i].name,t);}}
     if((double)out->timestamp/1e6<cmd_paint_until)out->r2=255;
+    // R2 while the core is held: every press counts as used; held, it is pressed again and again
+    // (down for the first half of each period, from the moment it went down; a tap passes as it is).
+    if(core_hold||key_core){const double t=(double)out->timestamp/1e6;const int r2=out->r2>30;
+        if(r2&&!core_r2_was)core_r2_from=t;
+        if(r2){core_used=t;core_pressed=1;
+            if(core_turbo&&fmod((t-core_r2_from)*CORE_TURBO_HZ,1.0)>=.5)out->r2=0;}
+        core_r2_was=r2;}else core_r2_was=0;
     if(out->l2>30)out->buttons|=0x100;if(out->r2>30)out->buttons|=0x200;
     if((contacts[0]||contacts[1])&&!was_touch[0]&&!was_touch[1])touch_start=out->timestamp;
     for(unsigned i=0;i<2;++i){if(contacts[i]){
