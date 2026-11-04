@@ -4,6 +4,7 @@
 #include "feedback_identity.h"
 #include "geometry.h"
 #include "ultrawide.h"
+#include "late_reads.h"
 #include "../src/runtime.h"
 #include <atomic>
 #include <cstdio>
@@ -114,7 +115,9 @@ extern "C" int native_install_hooks(unsigned char *image,std::uint64_t size){
     if(jobs<0)return jobs;
     const int ultrawide=iss::native::InstallUltrawide(image,size);
     if(ultrawide<0)return ultrawide;
-    const int installed=reduction+geometry+spin+markers+jobs+ultrawide;
+    const int late_particles=iss::native::InstallParticleLateRead(image,size);
+    if(late_particles<0)return late_particles;
+    const int installed=reduction+geometry+spin+markers+jobs+ultrawide+late_particles;
     const char *feedback=std::getenv("ISS_FEEDBACK_IDENTITY");
     if(!feedback||feedback[0]!='1')return installed;
     if(!gpu_feedback_identity_available()){

@@ -470,7 +470,12 @@ const char* const kGameEnvironment[][2] = {
     {"ISS_SUBMIT_EVERY", "1000"}, {"ISS_TEXTURE_LOOKUP_MEMO", "0"},
     {"ISS_TEXTURE_LOOKUP_MEMO_STATS", "0"}, {"ISS_THREAD_PRIORITY", "1"}, {"ISS_TIMELINE", "0"},
     {"ISS_TLS_PATCH", "1"}, {"ISS_TRACE_READBACK", "0"},
-    {"ISS_TUNING", "async_written_uploads=1,scout=1,scout_fast=1,bind_prefetch=1"},
+    {"ISS_TUNING", "async_written_uploads=1,scout=1,scout_fast=1,bind_prefetch=1,"
+                    // The exposure metering reads one frame stale (eboot 0x171600-0x1719ff).
+                    "relaxed_site=0x171600,relaxed_site=0x171700,relaxed_site=0x171800,relaxed_site=0x171900"},
+    // native/late_reads.cpp: the particle control blocks read at the next frame's start, and one
+    // ring submit per frame for the particle lights (fight dips, 4 Nov 2026).
+    {"ISS_PARTICLE_LATE_READ", "1"}, {"ISS_PARTICLE_LIGHT_ONE_SUBMIT", "1"},
     {"ISS_UNIFIED_FLUSH_IRQ", "0"}, {"ISS_UNIFIED_FLUSH_US", "1000"}, {"ISS_UNIFIED_MEMORY", "1"},
     {"ISS_UPLOAD_WORKER", "1"}, {"ISS_VISUAL_SEQUENCE", "0"}, {"SHADPS4_FAST_STAGE_LOOKUP", "1"},
     {"SHADPS4_PARALLEL_PRELOAD", "1"}, {"SHADPS4_REUSE_DESCRIPTOR_STORAGE", "1"},
