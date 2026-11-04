@@ -14,6 +14,8 @@
 #include "video_core/renderdoc.h"
 #include "core/debug_state.h"
 #include "overlay.h"
+#include "iss_dlss.h"
+namespace iss::dlss { extern std::atomic<unsigned long long> g_overlay_evaluates; extern std::atomic<bool> g_present_stall; }
 #include "visual_capture.h"
 #include "freeze_watchdog.h"
 
@@ -78,7 +80,17 @@ void Render(const vk::CommandBuffer& command,const vk::ImageView& view,const vk:
     static uint64_t sample_tick=SDL_GetTicksNS(),sample_flips=0;static double fps=0,ms=0;
     const uint64_t now=SDL_GetTicksNS(),flips=DebugState.flip_count.load(std::memory_order_relaxed);
     if(now-sample_tick>=500000000){const auto count=flips-sample_flips;double seconds=double(now-sample_tick)/1e9;fps=double(count)/seconds;ms=count?seconds*1000/double(count):0;sample_tick=now;sample_flips=flips;}
-    if(iss_show_fps.load()){char label[128];std::snprintf(label,sizeof(label),"%.1f FPS  |  %.2f ms\nF9: show/hide",fps,ms);
+    // ISS_DLSS=1: whether DLSS evaluated in the last half second (on), the player switched it off
+    // (Home / Fn+End), or it is not running.
+    static uint64_t dlss_sample_evals=0;static int dlss_state=0; // 0 not running, 1 on, 2 off
+    if(now-sample_tick<1000000&&iss::dlss::Mode()==1){const auto e=iss::dlss::g_overlay_evaluates.load(std::memory_order_relaxed);
+        dlss_state=!iss::dlss::g_ready.load()?0:!iss::dlss::g_user_on.load()?2:e!=dlss_sample_evals?1:0;dlss_sample_evals=e;}
+    if(iss_show_fps.load()){char label[320];
+        if(iss::dlss::Mode()==1)std::snprintf(label,sizeof(label),"%.1f FPS  |  %.2f ms\nDLSS: %s  (Home / Fn+End)%s\nF9: show/hide",fps,ms,
+            dlss_state==1?"ON (DLAA)":dlss_state==2?"OFF (game's AA)":"not running",
+            iss::dlss::g_present_stall.load(std::memory_order_relaxed)
+                ?"\nFrame limiter slowing presents: NVIDIA Control Panel ->\nProgram Settings -> iss-probe.exe -> Max Frame Rate: Off":"");
+        else std::snprintf(label,sizeof(label),"%.1f FPS  |  %.2f ms\nF9: show/hide",fps,ms);
         auto *draw=ImGui::GetForegroundDrawList();ImVec2 pos{16,16},size=ImGui::CalcTextSize(label);
         draw->AddRectFilled(pos,ImVec2{pos.x+size.x+20,pos.y+size.y+16},IM_COL32(0,0,0,190),5);
         draw->AddText(ImVec2{pos.x+10,pos.y+8},IM_COL32(235,245,255,255),label);}

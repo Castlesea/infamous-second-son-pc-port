@@ -27,6 +27,7 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
+#include "iss_dlss_upscale.h"
 
 #include <algorithm>
 #include <array>
@@ -42,6 +43,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <system_error>
@@ -784,6 +786,36 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     // Continue with host-side passes that draw the displayed (scaled) frame.
 
+    // D2 (ISS_DLSS_UPSCALE, iss_dlss_upscale.h): this frame's DLSS output with the HUD layer
+    // over it, at the output size, instead of the game's display buffer.
+    std::optional<iss::dlss::CompositeJob> dlss_job;
+    if (iss::dlss::Upscaler* upscaler = iss::dlss::GetUpscaler(instance)) {
+        if (!streamed && upscaler->Ready() && iss::dlss::HudLayerActive()) {
+            const u32 gw = iss::dlss::g_inputs.game_w, gh = iss::dlss::g_inputs.game_h;
+            VideoCore::Image* hud = nullptr;
+            texture_cache.ForEachImageAt(iss::dlss::HudLayerAddr(),
+                                         [&](VideoCore::ImageId, VideoCore::Image& candidate) {
+                if (!hud && candidate.info.size.width == gw && candidate.info.size.height == gh)
+                    hud = &candidate;
+            });
+            if (hud) {
+                runtime.Transit(hud, vk::ImageLayout::eShaderReadOnlyOptimal,
+                                vk::PipelineStageFlagBits2::eComputeShader,
+                                vk::AccessFlagBits2::eShaderRead);
+                VideoCore::ImageViewInfo hud_view_info{};
+                hud_view_info.type = AmdGpu::ImageType::Color2D;
+                hud_view_info.format = hud->info.pixel_format;
+                dlss_job = upscaler->TakeJob(*hud->FindView(hud_view_info).image_view);
+            } else {
+                static u32 misses = 0;
+                if (++misses <= 8)
+                    std::fprintf(stderr, "DLSS upscale: no HUD layer %ux%u at %#llx - display buffer shown\n",
+                                 gw, gh, static_cast<unsigned long long>(iss::dlss::HudLayerAddr()));
+            }
+        }
+        upscaler->SetOutputSize(frame->width, frame->height);
+    }
+
     runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
@@ -804,6 +836,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             });
         // The pass binds its own pipeline and dynamic state behind the tracking.
         draw_scheduler.GetDynamicState().binds.Forget();
+    } else if (dlss_job) {
+        iss::dlss::RecordComposite(cmdbuf, *dlss_job);
+        auto settings = pp_settings;
+        settings.srgb_input = false; // the composite is linear
+        pp_pass.Render(cmdbuf, dlss_job->out_view, dlss_job->size, *frame, settings);
     } else {
         image_view = fsr_pass.Render(cmdbuf, image_view, image_size,
                                      {frame->width, frame->height}, fsr_settings, frame->is_hdr);

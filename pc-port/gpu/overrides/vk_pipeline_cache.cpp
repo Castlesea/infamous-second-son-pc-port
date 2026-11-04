@@ -47,6 +47,8 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/driver_cache_data.h"
 #include "shader_salt.h"
+#include "iss_dlss.h"
+#include "iss_dlss_upscale.h"
 
 namespace iss {
 extern thread_local bool assert_throws;
@@ -2854,6 +2856,68 @@ bool PipelineCache::RefreshGraphicsKey() {
         key.write_masks[cb] =
             vk::ColorComponentFlags{key.color_buffers[cb].swizzle.ApplyMask(target_mask)};
 
+        // D2 (ISS_DLSS_UPSCALE): the HUD layer's alpha is its transmittance (what is left of the
+        // scene below; cleared to 1, the composite does hud.rgb + hud.a * scene). Every draw into
+        // it keeps its colour blend and multiplies alpha by its colour dst factor (evaluated on
+        // alpha: SRC_COLOR / SRC_ALPHA = As, ONE_MINUS_SRC_ALPHA = 1 - As, ONE = 1, ZERO = 0), so
+        // over panels, additive glows and the darkening panels (ZERO / SRC_ALPHA, ZERO /
+        // SRC_COLOR: test M, 2026-11-04) all keep their look. Blending off = opaque (alpha 0).
+        // ISS_DLSS_HUD_LOG=1 (diagnostic): each distinct blend / mask of the draws into the HUD
+        // layer, once (which draws lose their look in the layer).
+        if (cb == 0 && iss::dlss::UpscaleWanted() && col_buf.Address() == iss::dlss::HudLayerAddr()) {
+            static const bool hud_log = [] {
+                const char* v = std::getenv("ISS_DLSS_HUD_LOG");
+                return v && v[0] == '1';
+            }();
+            if (hud_log) {
+                static std::vector<u64> seen;
+                const auto& bc = regs.blend_control[0];
+                const u64 combo = (u64(key.blend_controls[0].enable) << 40) |
+                                  (u64(static_cast<u32>(bc.color_src_factor)) << 32) |
+                                  (u64(static_cast<u32>(bc.color_dst_factor)) << 24) |
+                                  (u64(static_cast<u32>(bc.color_func)) << 20) |
+                                  (u64(bc.separate_alpha_blend) << 19) |
+                                  (u64(static_cast<u32>(bc.alpha_src_factor)) << 12) |
+                                  (u64(static_cast<u32>(bc.alpha_dst_factor)) << 4) |
+                                  u64(static_cast<u32>(key.write_masks[0]));
+                if (std::find(seen.begin(), seen.end(), combo) == seen.end() && seen.size() < 64) {
+                    seen.push_back(combo);
+                    std::fprintf(stderr,
+                                 "DLSS HUD blend: enable %u src %u dst %u func %u sep %u asrc %u adst %u "
+                                 "afunc %u mask %#x\n",
+                                 u32(key.blend_controls[0].enable), u32(bc.color_src_factor),
+                                 u32(bc.color_dst_factor), u32(bc.color_func),
+                                 u32(bc.separate_alpha_blend), u32(bc.alpha_src_factor),
+                                 u32(bc.alpha_dst_factor), u32(bc.alpha_func),
+                                 u32(key.write_masks[0]));
+                }
+            }
+        }
+        if (cb == 0 && iss::dlss::UpscaleWanted() && col_buf.Address() == iss::dlss::HudLayerAddr() &&
+            !(key.write_masks[0] & vk::ColorComponentFlagBits::eA)) {
+            using Factor = AmdGpu::BlendControl::BlendFactor;
+            auto& bc = key.blend_controls[0];
+            if (!bc.enable) {
+                bc = {};
+                bc.enable = 1;
+                bc.color_src_factor = Factor::One;
+                bc.color_dst_factor = Factor::Zero;
+                bc.color_func = AmdGpu::BlendControl::BlendFunc::Add;
+            }
+            const Factor src = bc.color_src_factor;
+            const Factor dst = bc.color_dst_factor;
+            // A multiply onto the empty layer (DST_COLOR / ZERO) cannot be shown: left alone.
+            const bool keep = dst == Factor::Zero && (src == Factor::DstColor || src == Factor::OneMinusDstColor);
+            iss::dlss::g_key_seen.fetch_add(1, std::memory_order_relaxed);
+            if (!keep) {
+                iss::dlss::g_key_fixed.fetch_add(1, std::memory_order_relaxed);
+                bc.separate_alpha_blend = 1;
+                bc.alpha_src_factor = Factor::Zero;
+                bc.alpha_dst_factor = dst;
+                bc.alpha_func = AmdGpu::BlendControl::BlendFunc::Add;
+            }
+        }
+
         // Fill color samples
         const u8 prev_color_samples = std::exchange(color_samples, col_buf.NumSamples());
         all_color_samples_same &= color_samples == prev_color_samples || prev_color_samples == 0;
@@ -3600,6 +3664,9 @@ PipelineCache::Result PipelineCache::GetProgram(iss::g4::CpOwner owner, HwStage 
         if (auto& fetch = program->modules[0].spec.fetch_shader_data; !fetch.Empty()) {
             owner_fetch_shader = &fetch;
         }
+        if (owner == iss::g4::CpOwner::Graphics && !active_compute_snapshot)
+            iss::dlss::NoteProgram(sw_stage == SwStage::Fragment, params.hash, params.Base(),
+                                   program->info);
         return std::make_tuple(&program->info, module, perm_hash);
     }
 
@@ -3607,6 +3674,8 @@ PipelineCache::Result PipelineCache::GetProgram(iss::g4::CpOwner owner, HwStage 
     auto& info = program->info;
     info.pgm_base = active_compute_snapshot ? active_compute_snapshot->shader.guest_base
                                              : params.Base(); // inline cbuffer address fixup
+    if (owner == iss::g4::CpOwner::Graphics && !active_compute_snapshot)
+        iss::dlss::NoteProgram(sw_stage == SwStage::Fragment, params.hash, params.Base(), info);
     if (active_compute_snapshot) {
         program->replay_user_data = active_compute_snapshot->user_data;
         info.user_data = program->replay_user_data;

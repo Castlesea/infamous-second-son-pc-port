@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -16,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "infamous_renderer/native_instanced_feature.h"
 #include "native_gbuffer.h"
+#include "iss_dlss.h"
 
 #include <vk_mem_alloc.h>
 
@@ -198,6 +203,11 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
 }
 
 Instance::~Instance() {
+    if (iss::dlss::Mode() == 1 && device) {
+        // Streamline goes before the device (its rule); the GPU must be done with its work.
+        (void)device->waitIdle();
+        iss::dlss::Shutdown();
+    }
     iss::native_geometry::UnregisterIndirectFirstInstanceFeature(*this);
     ImGui::Core::Shutdown(GetDevice());
     vmaDestroyAllocator(allocator);
@@ -250,7 +260,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 64> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -475,6 +485,25 @@ bool Instance::CreateDevice() {
                     .pQueuePriorities = queue_priorities.data(),
                 };
                 break;
+            }
+        }
+    }
+
+    // ISS_DLSS=1 (iss_dlss.h): the device extensions Streamline asked for, when DLSS runs on this
+    // GPU. VK_EXT_buffer_device_address is left out: the core bufferDeviceAddress feature must not
+    // be combined with that name.
+    const bool dlss_device = iss::dlss::Mode() == 1 && iss::dlss::DeviceSupported(physical_device);
+    if (dlss_device) {
+        for (const char* ext : iss::dlss::DeviceExtensions()) {
+            const bool present = std::ranges::any_of(
+                enabled_extensions, [ext](const char* e) { return std::strcmp(e, ext) == 0; });
+            if (present || std::strcmp(ext, "VK_EXT_buffer_device_address") == 0) {
+                LOG_INFO(Render_Vulkan, "DLSS: device extension {} {}", ext,
+                         present ? "already enabled" : "left out");
+                continue;
+            }
+            if (!add_extension(ext)) {
+                LOG_WARNING(Render_Vulkan, "DLSS: device extension {} unavailable", ext);
             }
         }
     }
@@ -716,6 +745,9 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    if (dlss_device) {
+        iss::dlss::DeviceCreated(*instance, physical_device, *device, queue_family_index, 0);
+    }
     if (iss::asc_family::readback) {
         readback_queue = device->getQueue(iss::asc_family::family, 1);
         has_readback_queue = true;
