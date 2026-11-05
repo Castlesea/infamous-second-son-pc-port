@@ -23,6 +23,9 @@ def game_environment():
     text = (ROOT / 'launcher/launcher.cpp').read_text(encoding='utf-8')
     block = text[text.index('kGameEnvironment[][2] = {'):]
     block = block[:block.index('};')]
+    # C++ comments, and adjacent string literals as one (a value split over two lines).
+    block = re.sub(r'//[^\n]*', '', block)
+    block = re.sub(r'"\s*"', '', block)
     return dict(re.findall(r'\{"([A-Z0-9_]+)",\s*"([^"]*)"\}', block))
 
 

@@ -25,8 +25,8 @@ EXP = ROOT / 'out/experimental/20261016-native-passes-v1'
 # porte-vsync1 (2026-10-19): porte-x-save + shaders ahead of time + the 75 Hz stutter fixes;
 # porte-vsync1-pad: the same renderer, the controller layout, touchpad window, mouse touchpad and
 # spray can (src/pad.c, src/pad_panel.c).
-GPU_DLL = EXP / 'base-20261019-porte-vsync1-pad/iss-gpu.dll'
-PROBE_EXE = EXP / 'base-20261019-porte-vsync1-pad/iss-probe.exe'
+GPU_DLL = EXP / 'base-20261105-revisao2/iss-gpu.dll'
+PROBE_EXE = EXP / 'base-20261105-revisao2/iss-probe.exe'
 RECIPES = EXP / 'base-20261019-porte-aot3/recipes'          # verified stages only (make_recipes.py)
 SDL = ROOT / 'out/SDL3.dll'
 
