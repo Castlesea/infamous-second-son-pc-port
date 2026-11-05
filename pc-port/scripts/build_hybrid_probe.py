@@ -22,7 +22,7 @@ def main():
     env = build_gpu.environment()
     clang = str(build_gpu.CLANG)
     objects = []
-    for name in ('reduction', 'feedback_identity', 'hooks', 'geometry', 'geometry_hook', 'engine_draw', 'ultrawide'):
+    for name in ('reduction', 'feedback_identity', 'hooks', 'geometry', 'geometry_hook', 'engine_draw', 'ultrawide', 'late_reads'):
         obj = exe.parent / ('native-' + name + '.obj')
         subprocess.run([clang, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/O2', '/MD',
                         '/D_CRT_SECURE_NO_WARNINGS', '/arch:AVX2', '/fp:precise', '/c',

@@ -28,7 +28,7 @@ def build(output=None):
     from content_profile import create
     create()
     native_objects=[]
-    for name in ('reduction','feedback_identity','hooks','geometry','geometry_hook','engine_draw','ultrawide'):
+    for name in ('reduction','feedback_identity','hooks','geometry','geometry_hook','engine_draw','ultrawide','late_reads'):
         obj=out/f'native-{name}.obj'
         subprocess.run([str(CLANG),'/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/MD','/D_CRT_SECURE_NO_WARNINGS','/arch:AVX2','/fp:precise','/c',str(ROOT/f'native/{name}.cpp'),f'/Fo:{obj}'],cwd=out,env=env,check=True)
         native_objects.append(str(obj))
