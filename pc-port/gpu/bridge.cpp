@@ -463,7 +463,9 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             else if(name=="hot_page_faults")set(tuning.hot_page_faults,value);
             else if(name=="async_written_uploads")set(tuning.async_written_uploads,value);
             else if(name=="async_uploads")set(tuning.async_uploads,value);
-            else if(name=="readback_write_discard")set(tuning.readback_write_discard,value);
+            // The flag also marks it as set here: MemoryTracker (created after this) otherwise resets it
+            // from the emulator settings (off), so readback_write_discard=1 never took effect.
+            else if(name=="readback_write_discard"){set(tuning.readback_write_discard,value);tuning.readback_write_discard_from_ini=true;}
             else if(name=="readback_write_merge")set(tuning.readback_write_merge,value);
             else if(name=="gpu_threads_priority")set(tuning.gpu_threads_priority,value);
             else if(name=="asc_yield_packets")set(tuning.asc_yield_packets,value);
