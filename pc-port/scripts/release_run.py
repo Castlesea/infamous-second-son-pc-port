@@ -34,6 +34,7 @@ def main():
     ap.add_argument('--seconds', type=int, default=300)
     ap.add_argument('--pad', default='run')
     ap.add_argument('--set', action='append', default=[])
+    ap.add_argument('--image', type=Path, help='the prepared game image to use instead of the release one')
     ap.add_argument('--cache', type=Path, help='the shader cache (current) to copy instead of the release one')
     args = ap.parse_args()
     rel = args.release.resolve()
@@ -68,7 +69,7 @@ def main():
     for item in args.set:
         k, _, v = item.partition('=')
         env[k] = v
-    image = rel / 'user/prepared/boot-linked.bin'
+    image = (args.image or rel / 'user/prepared/boot-linked.bin').resolve()
     out = open(work / 'logs/stdout.log', 'wb')
     err = open(work / 'logs/stderr.log', 'wb')
     start = time.time()

@@ -2630,6 +2630,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     // at each exit after PLAY (0xc0000005 in ntdll, 2026-10-19).
     g_background.reset();
     g_logo.reset();
+    for (auto& art : g_card_art) art.reset();
     g_backdrop.reset();
     g_back_buf.reset();
     g_layer_buf.reset();
