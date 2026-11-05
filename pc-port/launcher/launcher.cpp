@@ -43,6 +43,7 @@ namespace fs = std::filesystem;
 using namespace Gdiplus;
 
 namespace iss_prepare {
+extern const char* const PreparedFormat;
 std::wstring PrepareGame(const fs::path& game, const fs::path& out_file,
                          const std::function<void(float, const wchar_t*)>& progress);
 }
@@ -729,8 +730,12 @@ bool PreparedReady() {
     if (!fs::is_regular_file(image, ec)) return false;
     if (g_extra.count("prepared_image")) return true;
     std::ifstream f(image.wstring() + L".source");
-    std::string source;
+    std::string source, hash, format;
     std::getline(f, source);
+    std::getline(f, hash);
+    std::getline(f, format);
+    // An image prepared by an older launcher lacks later patches (the Intel ones): made again.
+    if (format != iss_prepare::PreparedFormat) return false;
     return fs::equivalent(fs::path(Widen(source)), fs::path(g_game_dir), ec);
 }
 
