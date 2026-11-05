@@ -40,6 +40,7 @@ namespace iss { extern std::atomic<unsigned> g_preload_entries, g_preload_total;
 #include <boost/asio/executor_work_guard.hpp>
 #include <xxhash.h>
 #include "common/elf_info.h"
+#include "common/memory_patcher.h"
 #include "common/path_util.h"
 #include "common/perf_stats.h"
 #include "common/rdtsc.h"
@@ -355,6 +356,9 @@ extern "C" void IssPreciseSleepUs(unsigned us){
 extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     if(!callbacks||callbacks->struct_size!=sizeof(host)||!callbacks->backing||!callbacks->clamp||!callbacks->visit_mappings||!callbacks->protect||!callbacks->mapping_epoch||!callbacks->mapping_lock_shared||!callbacks->mapping_unlock_shared)return -1;
     host=*callbacks;
+    // The game's code base for eboot offsets in the renderer (readback_relaxed_sites:
+    // BufferCache::IsRelaxedSite returned false for every site while this stayed 0).
+    MemoryPatcher::g_eboot_address=host.image_base;
     iss::timeline::Emit("gpu_initialize",0,0,host.image_base);
     iss::freeze_watchdog::SetImageBase(host.image_base);
     // The executing image (as native/engine_draw.cpp patches it), not a backing view.
