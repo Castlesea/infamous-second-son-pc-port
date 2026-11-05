@@ -460,6 +460,135 @@ Bytes BuildLinked(std::vector<Module>& mods) {
     return raw;
 }
 
+// Port of iss_intel_fix.py: rewrites 96 SSE4A EXTRQ instructions for Intel CPU compatibility.
+// EXTRQ is an AMD-only instruction (STATUS_ILLEGAL_INSTRUCTION on Intel); each site is replaced by
+// a call to a software equivalent in the reserved code cave at SSE4A_CAVE.
+void PatchIntelCompat(Bytes& raw) {
+    static constexpr uint64_t IMAGE_SIZE = 0x823854DUL;
+    static constexpr uint64_t SSE4A_CAVE = 0xCBF000UL;
+    if (raw.size() < 16 || memcmp(raw.data(), "ISSPRB02", 8) != 0) return;
+    uint64_t declared; memcpy(&declared, raw.data() + 8, 8);
+    if (declared != IMAGE_SIZE || raw.size() < IMAGE_SIZE) return;
+    const size_t base = raw.size() - IMAGE_SIZE;
+    u8* img = raw.data() + base;
+
+    // Generate extrq_helper(dst, src) code: software EXTRQ xmmDst,xmmSrc using integer registers.
+    auto make_helper = [](int dst, int src) {
+        Bytes c;
+        auto put = [&](std::initializer_list<u8> b) { c.insert(c.end(), b); };
+        auto rex_b = [](bool r) -> u8 { return u8(0x48u | (r ? 4u : 0u)); };
+        put({0x50, 0x51, 0x52}); // push rax,rcx,rdx
+        put({0x66, rex_b(dst>=8), 0x0F, 0x7E, u8(0xC0|(dst&7)<<3)}); // movq rax,xmmDst
+        put({0x66, rex_b(src>=8), 0x0F, 0x7E, u8(0xC1|(src&7)<<3)}); // movq rcx,xmmSrc
+        put({0x0F, 0xB6, 0xD5}); // movzx edx,ch (index = bits[13:8] of src)
+        put({0xC4, 0xE2, 0xEB, 0xF7, 0xC0}); // shrx rax,rax,rdx
+        put({0xF7, 0xD1}); // not ecx
+        put({0x8D, 0x49, 0x01}); // lea ecx,[rcx+1] (-length mod 64)
+        put({0xC4, 0xE2, 0xF1, 0xF7, 0xC0}); // shlx rax,rax,rcx
+        put({0xC4, 0xE2, 0xF3, 0xF7, 0xC0}); // shrx rax,rax,rcx
+        put({0x66, rex_b(dst>=8), 0x0F, 0x6E, u8(0xC0|(dst&7)<<3)}); // movq xmmDst,rax
+        put({0x5A, 0x59, 0x58, 0xC3}); // pop rdx,rcx,rax; ret
+        return c;
+    };
+    auto put_i32 = [](Bytes& c, int32_t v) {
+        c.insert(c.end(), reinterpret_cast<u8*>(&v), reinterpret_cast<u8*>(&v) + 4);
+    };
+    auto unhex = [](const char* s) {
+        Bytes b; for (; *s && *(s+1); s += 2) { char t[3]={s[0],s[1],0}; b.push_back(u8(strtol(t,nullptr,16))); } return b;
+    };
+
+    // The 96 EXTRQ sites from iss_intel_fix.py: {offset_in_img, insn_len, dst, src, follower_len, follower_hex}
+    static const struct { uint64_t ip; int len,dst,src,fl_len; const char* fl; } sites[] = {
+        {0x890a77,4,1,7,5,"c4c1796ff8"},{0x890a84,4,5,4,4,"c55162c1"},{0x890a9f,4,1,4,4,"c5f96fee"},
+        {0x890aa7,4,5,3,4,"c5d162e9"},{0x890c8e,5,5,15,0,""},{0x890c9c,4,7,0,4,"c5c162c5"},
+        {0x890cbb,4,5,0,5,"c4c1796ff9"},{0x890ccd,4,7,0,4,"c5c162ed"},
+        {0x890ce3,4,7,0,9,"c5f828842490020000"},{0x890cf0,4,0,3,4,"c57962ef"},
+        {0x890d20,5,3,10,0,""},{0x890d2e,4,0,4,4,"c57962cb"},{0x890df9,5,0,15,0,""},
+        {0x890e15,4,1,3,4,"c5f162c0"},{0x890e2b,5,1,10,0,""},{0x890e3d,4,3,4,4,"c5e162c9"},
+        {0x8910b3,4,0,3,4,"c5f96fde"},{0x8910bb,4,3,7,4,"c5e162d8"},
+        {0x8910d6,4,0,7,4,"c5f96ffc"},{0x8910de,4,4,5,4,"c5d962e0"},
+        {0x89137d,4,0,1,9,"c5f8288c24d0020000"},{0x89138a,4,1,3,4,"c5f162c8"},
+        {0x8913aa,4,0,3,9,"c5f8289c2490020000"},{0x8913b7,5,3,10,0,""},
+        {0x8913ce,4,0,3,4,"c5f96fda"},{0x8913df,4,3,4,4,"c5e162d8"},
+        {0x8913f5,4,0,4,5,"c4c1796fe5"},{0x89140c,4,4,6,4,"c5d962c0"},
+        {0x8914d7,4,0,1,9,"c5796fa424f0000000"},{0x8914f2,4,1,3,4,"c5f162c0"},
+        {0x891511,4,1,3,5,"c441796fce"},{0x89151f,5,3,10,0,""},
+        {0x8917ea,4,0,3,5,"c4c1796fd2"},{0x8917f3,5,2,9,0,""},
+        {0x891807,5,0,15,0,""},{0x891811,5,2,14,0,""},
+        {0x891827,4,0,3,9,"c5f8289424c0020000"},{0x891834,5,2,9,0,""},
+        {0x891846,5,2,15,0,""},{0x891854,5,3,14,0,""},
+        {0x891958,4,6,0,4,"c5f828e5"},{0x891960,4,4,0,6,"c4e3210fc304"},
+        {0x89196a,5,10,0,0,""},{0x891978,4,7,0,10,"c5b0c6942460020000cc"},
+        {0x89199e,4,1,6,9,"c5f828ac2490020000"},{0x8919ab,4,5,3,4,"c5d162c9"},
+        {0x891a10,4,7,6,9,"c5f828b424f0020000"},{0x891a1d,4,6,3,4,"c5c962df"},
+        {0x8938f1,4,4,7,5,"c4c1796ff3"},{0x8938fa,4,6,0,4,"c5c962e4"},
+        {0x89391f,4,6,0,9,"c5796f842410030000"},{0x893931,5,7,14,0,""},
+        {0x893b2d,4,3,6,9,"c5f828b42450020000"},{0x893b3a,4,6,0,4,"c5c962c3"},
+        {0x893b56,4,3,0,5,"c4c1796ff2"},{0x893b68,4,6,0,4,"c54962db"},
+        {0x893b7e,4,3,0,9,"c578288c2410020000"},{0x893b90,5,6,14,0,""},
+        {0x893bbb,5,4,14,0,""},{0x893bc9,4,0,5,4,"c57962d4"},
+        {0x893c8b,4,0,1,9,"c5f8288c2430020000"},{0x893ca1,4,1,3,4,"c5f162c8"},
+        {0x893cb2,5,0,14,0,""},{0x893cbc,4,3,5,4,"c5e162c0"},
+        {0x893e60,4,0,5,4,"c5f96fe7"},{0x893e68,4,4,1,4,"c5d962e0"},
+        {0x893e83,4,0,1,4,"c5f96ffa"},{0x893e8b,4,7,6,4,"c5c162c0"},
+        {0x893fa7,4,3,0,9,"c5f828842400030000"},{0x893fbd,4,0,4,4,"c5f962db"},
+        {0x893fd7,4,0,4,9,"c5f828a424e0020000"},{0x893fe4,4,4,6,4,"c5d962c0"},
+        {0x89404b,4,6,3,6,"c4e3110fd104"},{0x89405e,4,0,2,4,"c5f962f6"},
+        {0x894075,5,7,10,0,""},{0x894083,4,0,1,4,"c5f962c7"},
+        {0x8940f0,4,5,3,9,"c57828842400030000"},{0x8940fd,5,8,2,0,""},
+        {0x89412c,5,0,10,0,""},{0x89413a,4,5,1,4,"c5d162c0"},
+        {0x89436a,4,0,1,4,"c5f96fcc"},{0x894372,4,1,3,4,"c5f162d8"},
+        {0x8943d9,4,5,1,4,"c5f96ff2"},{0x8943e5,4,6,7,4,"c5c962ed"},
+        {0x8944a9,4,3,5,4,"c5f96fec"},{0x8944b1,4,5,1,4,"c5d162db"},
+        {0x89450f,4,5,1,4,"c5f96ff8"},{0x894517,5,7,14,0,""},
+        {0x894618,4,0,5,4,"c5f96fec"},{0x894629,4,5,7,4,"c5d162e8"},
+        {0x89463f,4,0,7,5,"c4c1796ffc"},{0x894651,4,7,6,4,"c5c162c0"},
+        {0x8946bb,4,1,0,9,"c5f8288424e0010000"},{0x8946c8,4,4,0,9,"c5e1ebac2440020000"},
+        {0x894757,5,11,0,0,""},{0x89475c,5,12,14,0,""},
+    };
+
+    // Write helper functions into the code cave, one per unique (dst,src) pair.
+    std::map<std::pair<int,int>, uint64_t> helpers;
+    uint64_t pos = SSE4A_CAVE;
+    for (const auto& s : sites) {
+        auto key = std::make_pair(s.dst, s.src);
+        if (!helpers.count(key)) {
+            Bytes code = make_helper(s.dst, s.src);
+            memcpy(img + pos, code.data(), code.size());
+            helpers[key] = pos;
+            pos = (pos + code.size() + 15) & ~uint64_t(15);
+        }
+    }
+
+    // Write a stub per site: red-zone protection + call helper + follower + jmp back.
+    // Replace original EXTRQ (+ follower if needed) with jmp to stub.
+    for (const auto& s : sites) {
+        uint64_t helper = helpers[{s.dst, s.src}];
+        uint64_t stub = pos;
+        uint64_t back = s.ip + s.len + s.fl_len;
+        Bytes code;
+        auto put = [&](std::initializer_list<u8> b) { code.insert(code.end(), b); };
+        // lea rsp,[rsp-0x80]
+        put({0x48, 0x8D, 0x64, 0x24, 0x80});
+        // call helper
+        put({0xE8}); put_i32(code, int32_t(helper - (stub + code.size() + 4)));
+        // lea rsp,[rsp+0x80]
+        put({0x48, 0x8D, 0xA4, 0x24, 0x80, 0x00, 0x00, 0x00});
+        // follower instruction bytes
+        Bytes fl = unhex(s.fl); code.insert(code.end(), fl.begin(), fl.end());
+        // jmp back
+        put({0xE9}); put_i32(code, int32_t(back - (stub + code.size() + 4)));
+        memcpy(img + stub, code.data(), code.size());
+        pos = (pos + code.size() + 15) & ~uint64_t(15);
+        // Patch original site: jmp stub + int3 fill
+        int32_t jmp_rel = int32_t(stub - (s.ip + 5));
+        img[s.ip] = 0xE9;
+        memcpy(img + s.ip + 1, &jmp_rel, 4);
+        int covered = s.len + s.fl_len;
+        for (int i = 5; i < covered; ++i) img[s.ip + i] = 0xCC;
+    }
+}
+
 } // namespace
 
 // Prepares out_file from the game folder. progress(0..1, step) is called between the steps.
@@ -478,7 +607,8 @@ std::wstring PrepareGame(const fs::path& game, const fs::path& out_file,
         mods.push_back(LoadModule(game / "sce_module" / "libc.prx", false));
         mods.push_back(LoadModule(game / "sce_module" / "libSceFios2.prx", false));
         progress(0.70f, L"Linking");
-        const Bytes raw = BuildLinked(mods);
+        Bytes raw = BuildLinked(mods);
+        PatchIntelCompat(raw);
         progress(0.90f, L"Writing");
         std::error_code ec;
         fs::create_directories(out_file.parent_path(), ec);
