@@ -20,6 +20,23 @@ CLANG=toolchain.clang()
 LTO_MODES=('none','thin','full')
 CPU_TARGETS=('generic','znver3')
 
+INCLUDE_INL=re.compile(rb'^\s*#\s*include\s+"([^"]+\.inl)"',re.M)
+
+def with_fragments(source,seen=None):
+    seen=set() if seen is None else seen
+    data=source.read_bytes()
+    out=data
+    for name in INCLUDE_INL.findall(data):
+        name=name.decode()
+        for base in (source.parent,ROOT/'gpu'):
+            fragment=(base/name).resolve()
+            if fragment.exists():
+                if fragment not in seen:
+                    seen.add(fragment)
+                    out+=with_fragments(fragment,seen)
+                break
+    return out
+
 def optimization_options(lto='none',cpu='generic',jobs=4):
     if lto not in LTO_MODES or cpu not in CPU_TARGETS:
         raise ValueError('Unsupported LTO mode or CPU target')
@@ -104,23 +121,9 @@ def build(check=False,jobs=4,output=None,lto='none',cpu='generic',dry_run=False)
     def compile_one(source):
         name=hashlib.sha256(str(source).encode()).hexdigest()[:16]
         obj=out/(name+'.obj'); log=out/(name+'.log'); stamp=out/(name+'.json')
-        source_bytes=source.read_bytes()
-        if source==ROOT/'gpu/native_shadow.cpp':
-            source_bytes+=(ROOT/'gpu/native_shadow_capture.inl').read_bytes()
-            source_bytes+=(ROOT/'gpu/native_shadow_outer.inl').read_bytes()
-        if source==ROOT/'gpu/overrides/liverpool.cpp':
-            source_bytes+=(ROOT/'gpu/hybrid_family_profile.inl').read_bytes()
-        # This local implementation fragment is private to the rasterizer, not a global header.
-        if source==ROOT/'gpu/overrides/vk_rasterizer.cpp':
-            for name in ('draw_pipe_rasterizer.inl', 'native_draw_run_rasterizer.inl',
-                         'native_instanced_run_rasterizer.inl', 'native_cpu_draw_run.inl',
-                         'stage_bind_memo.inl', 'fast_draw.inl', 'native_items.inl', 'native_visual_probe.inl',
-                         'native_depth_run.inl', 'native_depth_run_verify.inl',
-                         'native_shadow_rasterizer.inl', 'native_gbuffer_rasterizer.inl',
-                         'occlusion_diag.inl','native_material_rasterizer.inl','native_recorder.inl',
-                         'native_passes_rasterizer.inl', 'native_compute_rasterizer.inl'):
-                fragment=ROOT/'gpu'/name
-                if fragment.exists():source_bytes+=fragment.read_bytes()
+        # The source with every .inl fragment it includes (recursively): an edited fragment
+        # recompiles its includer (a fixed list once missed gpu_blackbox.inl in vk_scheduler.cpp).
+        source_bytes=with_fragments(source)
         identity={'flags':signature,'source_sha256':hashlib.sha256(source_bytes).hexdigest()}
         if obj.exists() and stamp.exists() and json.loads(stamp.read_text())==identity:return source,obj,0,''
         result=subprocess.run([str(CLANG),*flags,'/c',str(source),f'/Fo:{obj}'],env=env,cwd=WORKSPACE/'build-opt',capture_output=True,text=True)

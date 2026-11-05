@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
@@ -495,8 +496,29 @@ void GraphicsPipeline::CompileVariant(bool fast) {
         .layout = *pipeline_layout,
     };
 
+    // ISS_COMPILE_TRACE=1 (diagnosis): each driver compile's stages before and after it, flushed,
+    // so a compile that kills the process inside the driver (exit 0xC0000409 with no message of
+    // ours, the driver's own C runtime) is the last BEGIN without an END.
+    static const bool compile_trace = [] {
+        const char* p = std::getenv("ISS_COMPILE_TRACE");
+        return p && p[0] == '1';
+    }();
+    const unsigned long long trace_tid =
+        compile_trace ? std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFFF : 0;
+    if (compile_trace) {
+        std::fprintf(stderr, "COMPILE_BEGIN tid=%llx stages=%llx,%llx,%llx,%llx,%llx,%llx fast=%d\n",
+                     trace_tid, (unsigned long long)key.stage_hashes[0],
+                     (unsigned long long)key.stage_hashes[1], (unsigned long long)key.stage_hashes[2],
+                     (unsigned long long)key.stage_hashes[3], (unsigned long long)key.stage_hashes[4],
+                     (unsigned long long)key.stage_hashes[5], int(fast));
+        std::fflush(stderr);
+    }
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(build->pipeline_cache, pipeline_info);
+    if (compile_trace) {
+        std::fprintf(stderr, "COMPILE_END tid=%llx result=%d\n", trace_tid, int(pipeline_result));
+        std::fflush(stderr);
+    }
     if (pipeline_result != vk::Result::eSuccess && tiered) {
         if (fast) {
             LOG_WARNING(Render_Vulkan, "Fast graphics creation failed ({}); normal compilation",

@@ -40,8 +40,11 @@ u64 Word64(const std::vector<u8>& bytes, size_t offset) {
 u64 HashCombine(u64 shader, u64 permutation) {
     return shader ^ (permutation + 0x9e3779b9ULL + (shader << 12) + (shader >> 4));
 }
-void ValidateRecipes(const std::map<std::string, std::vector<u8>>& snapshot) {
-    std::map<u64, u64> variants;
+/// cache_variants: the stages the library left to the cache (their permutation, from the cache's
+/// metadata), which the library's pipeline keys may name.
+void ValidateRecipes(const std::map<std::string, std::vector<u8>>& snapshot,
+                     const std::map<u64, u64>& cache_variants) {
+    std::map<u64, u64> variants = cache_variants;
     for (const auto& [name, bytes] : snapshot) {
         if (!name.ends_with(".spv")) continue;
         const auto underscore = name.find('_');
@@ -225,6 +228,8 @@ bool Open(std::span<const u8> profile, const std::filesystem::path& primary) {
         std::map<std::string, std::vector<u8>> snapshot;
         size_t total = saved_profile.size();
         size_t pack_offset = 0;
+        size_t kept_from_cache = 0;
+        std::map<u64, u64> cache_variants;
         const auto& assets = manifest.at("assets");
         if (!assets.is_array() || assets.size() > 50000) throw std::runtime_error("asset count out of bounds");
         for (const auto& item : assets) {
@@ -232,31 +237,47 @@ bool Open(std::span<const u8> profile, const std::filesystem::path& primary) {
                 throw std::runtime_error("noncontiguous packed recipes");
             auto bytes = CheckedFile(root, item, false, packed);
             pack_offset += bytes.size();
+            const auto name = item.at("filename").get<std::string>();
             total += bytes.size();
             if (total > MaxTotal) throw std::runtime_error("library exceeds memory budget");
-            const auto name = item.at("filename").get<std::string>();
             // ISS_DYNAMIC_STRIDE / ISS_AOT_COMPUTE: compute shaders are compiled with another
             // recompiler variant (and by the AOT compiler into the cache): the library's are
             // stale; its graphics recipes are kept.
             if (skip_compute && IsComputeAsset(name, bytes)) continue;
-            // Permutation indices are local to their cache lineage: never silently merge
-            // conflicting metadata/SPIR-V or shadow a normal cache file.
-            if (primary_names.contains(name) && ReadFile(primary / name) != bytes)
-                throw std::runtime_error("conflict with current cache lineage");
+            // Never shadow a normal cache file: a name the cache has with other bytes is left to
+            // the cache (its own metadata and SPIR-V load as without a library). The name is
+            // HashCombine(shader, permutation), so it is the same stage of the same lineage; the
+            // bytes differ when the runtime rewrote it in a newer format (recipes ship .meta v6,
+            // the cache writes v7). Dropping the whole library for that turned every recipe off
+            // from the second session on (2096 of 19054 names, 2026-10-19); taking the cache's
+            // bytes into the library made those stages recipes, regenerated from v7 metadata
+            // without their attribute formats: SPIR-V that crashed the driver (0xC0000409).
+            if (primary_names.contains(name)) {
+                const auto own = ReadFile(primary / name);
+                if (own != bytes) {
+                    ++kept_from_cache;
+                    if (name.ends_with(".meta") && own.size() >= 24) {
+                        const u64 hash = std::stoull(name.substr(2, 16), nullptr, 16);
+                        if (Word64(own, 8) == hash) cache_variants.emplace(hash, Word64(own, 16));
+                    }
+                    continue;
+                }
+            }
             if (!snapshot.emplace(name, std::move(bytes)).second)
                 throw std::runtime_error("duplicate recipe filename");
         }
         if (!packed.empty() && pack_offset != packed.size())
             throw std::runtime_error("trailing bytes in recipe pack");
-        ValidateRecipes(snapshot);
+        ValidateRecipes(snapshot, cache_variants);
         for (const auto& [name, bytes] : snapshot) {
             if (!name.ends_with(".key")) continue;
             if (!primary_names.contains(name)) extra_keys.push_back(name);
         }
         snapshot.emplace("profile.bin", std::move(saved_profile));
         files = std::move(snapshot); enabled = true;
-        std::fprintf(stderr, "PIPELINE_LIBRARY ready=1 assets=%zu additional_keys=%zu bytes=%zu prepare_ms=%.3f\n",
-                     assets.size(), extra_keys.size(), total, double(Common::Perf::NowNs()-started)/1e6);
+        std::fprintf(stderr, "PIPELINE_LIBRARY ready=1 assets=%zu additional_keys=%zu bytes=%zu left_to_cache=%zu prepare_ms=%.3f\n",
+                     assets.size(), extra_keys.size(), total, kept_from_cache,
+                     double(Common::Perf::NowNs()-started)/1e6);
         return true;
     } catch (const std::exception& e) {
         files.clear(); extra_keys.clear();

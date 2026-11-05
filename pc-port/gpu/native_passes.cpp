@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <condition_variable>
 #include <thread>
+#include <intrin.h>
 
 #ifndef ISS_SYSV
 #define ISS_SYSV __attribute__((sysv_abi))
@@ -781,6 +782,10 @@ struct SubmitState {
     std::deque<ScanItem> scans;
     // Statistics.
     std::atomic<u64> submits{}, scan_us{}, dcbs_recorded{}, jobs_done{}, cp_waits{}, cp_wait_us{};
+    // ISS_NATIVE_PASSES_CP_RECORDS: jobs the command processor recorded itself, and its time.
+    std::atomic<u64> cp_records{}, cp_record_us{};
+    // ISS_NATIVE_PASSES_SPIN_US: waits that ended while watching the job (no sleep).
+    std::atomic<u64> cp_spins{};
 };
 SubmitState submit;
 
@@ -1041,6 +1046,17 @@ void RecordCommandBuffer(Lane& l, const u32* begin, const u32* end, const std::v
     CloseSegment(l, CloseChunk);
 }
 
+// A recorded job: its command buffer learns it (the caller does not hold pool_mutex).
+void FinishJob(const Job& job) {
+    submit.jobs_done.fetch_add(1, std::memory_order_relaxed);
+    if (job.work->job_done) job.work->job_done[job.index].store(1, std::memory_order_release);
+    const bool last = job.work->jobs_left.fetch_sub(1, std::memory_order_acq_rel) == 1;
+    if (last || job.work->job_done) {
+        std::scoped_lock lock{submit.pool_mutex};
+        submit.done_cv.notify_all();
+    }
+}
+
 void PoolThread() {
     SetThreadDescription(GetCurrentThread(), L"ISS:NativePassesPool");
     auto lane = NewJobLane();
@@ -1053,21 +1069,16 @@ void PoolThread() {
             submit.jobs.pop_front();
         }
         RecordCommandBuffer(*lane, job.begin, job.end, job.start);
-        submit.jobs_done.fetch_add(1, std::memory_order_relaxed);
-        if (job.work->job_done) job.work->job_done[job.index].store(1, std::memory_order_release);
-        const bool last = job.work->jobs_left.fetch_sub(1, std::memory_order_acq_rel) == 1;
-        if (last || job.work->job_done) {
-            std::scoped_lock lock{submit.pool_mutex};
-            submit.done_cv.notify_all();
-        }
+        FinishJob(job);
     }
 }
 
 u64 NowUs() {
-    LARGE_INTEGER t, f;
-    QueryPerformanceCounter(&t);
-    QueryPerformanceFrequency(&f);
-    return u64(t.QuadPart * 1000000 / f.QuadPart);
+    // steady_clock: the counter * 1000000 before dividing overflowed after ~10 days of uptime
+    // (a 10 MHz counter), which broke the 50 ms timeout of AscRecorded.
+    return u64(std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
 }
 
 // The scissor setters of the eboot's DrawCommandBuffer (setScreenScissor 0x626890, called by the
@@ -1269,11 +1280,59 @@ bool JobWait() {
     }();
     return enabled;
 }
+// ISS_NATIVE_PASSES_CP_RECORDS=1 (opt-in: no measurable gain, sessions 2026-10-20): a job no pool thread has taken yet is
+// recorded by the command processor itself instead of sleeping until a pool thread is free, takes
+// it and wakes it (the same recording, on the thread that needs it; the pool was behind on the
+// heavy frames: cp_wait p99 12.7 ms, session 2026-10-19).
+bool CpRecords() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_CP_RECORDS");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+
 // Waits (pool lock held) until job k of the command processor's command buffer is recorded.
 void WaitJob(std::unique_lock<std::mutex>& lock, DcbWork& work, u32 k) {
     const auto done = [&] { return work.job_done[k].load(std::memory_order_acquire) != 0; };
     if (done()) return;
     const u64 t0 = NowUs();
+    if (CpRecords()) {
+        const auto it = std::find_if(submit.jobs.begin(), submit.jobs.end(), [&](const Job& j) {
+            return j.work.get() == &work && j.index == k;
+        });
+        if (it != submit.jobs.end()) {
+            Job job = std::move(*it);
+            submit.jobs.erase(it);
+            lock.unlock();
+            static thread_local std::unique_ptr<Lane> lane;
+            if (!lane) lane = NewJobLane();
+            RecordCommandBuffer(*lane, job.begin, job.end, job.start);
+            FinishJob(job);
+            lock.lock();
+            submit.cp_records.fetch_add(1, std::memory_order_relaxed);
+            submit.cp_record_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+            return;
+        }
+    }
+    // ISS_NATIVE_PASSES_SPIN_US=N (opt-in, default 0: 88% of the waits ended spinning but the
+    // command processor's wait time and the FPS stayed the same, clean-s2b 2026-10-20). A pool thread is recording the job; most end
+    // within ~100 us, and a condition variable wake on Windows costs tens of microseconds more
+    // (~9 waits a submission, ~86 us each, session 2026-10-20). Watch the job briefly first.
+    static const u64 spin_us = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_SPIN_US");
+        return p ? u64(std::max(0, std::atoi(p))) : u64(0);
+    }();
+    if (spin_us) {
+        lock.unlock();
+        while (!done() && NowUs() - t0 < spin_us) _mm_pause();
+        lock.lock();
+        if (done()) {
+            submit.cp_spins.fetch_add(1, std::memory_order_relaxed);
+            submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+            return;
+        }
+    }
     submit.done_cv.wait(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
@@ -1761,12 +1820,15 @@ void Report() {
     if (const u64 n = submit.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_PASSES_SUBMIT submits=%llu dcbs=%llu jobs=%llu scan_us/submit=%llu "
-                     "cp_waits=%llu cp_wait_us/submit=%llu\n",
+                     "cp_waits=%llu cp_wait_us/submit=%llu cp_records=%llu cp_record_us/submit=%llu cp_spins=%llu\n",
                      (unsigned long long)n, (unsigned long long)submit.dcbs_recorded.load(),
                      (unsigned long long)submit.jobs_done.load(),
                      (unsigned long long)(submit.scan_us.load() / n),
                      (unsigned long long)submit.cp_waits.load(),
-                     (unsigned long long)(submit.cp_wait_us.load() / n));
+                     (unsigned long long)(submit.cp_wait_us.load() / n),
+                     (unsigned long long)submit.cp_records.load(),
+                     (unsigned long long)(submit.cp_record_us.load() / n),
+                     (unsigned long long)submit.cp_spins.load());
     if (const u64 n = asc_stats.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_ASC submits=%llu ibs=%llu dispatches=%llu jobs=%llu scan_us/submit=%.1f "

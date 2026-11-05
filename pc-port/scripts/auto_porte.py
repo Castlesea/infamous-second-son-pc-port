@@ -90,6 +90,7 @@ def main():
     ap.add_argument('--cold', action='store_true')
     ap.add_argument('--resume', help='continue the private cache of an earlier label (its salt too)')
     ap.add_argument('--set', action='append', default=[])
+    ap.add_argument('--cache', type=Path, help='copy this shader cache (a folder with CUSA00004) instead of the user cache')
     args = ap.parse_args()
     build = args.build if args.build.is_absolute() else (ROOT / args.build)
     exe = build / 'iss-probe.exe'
@@ -137,7 +138,7 @@ def main():
         (work / 'salt.txt').write_text(flags['ISS_SHADER_SALT'])
     else:
         lib = play.library()
-        shutil.copytree(play.LINEAGE / 'current', work)
+        shutil.copytree(args.cache or play.LINEAGE / 'current', work)
         (work / '.unverified').unlink(missing_ok=True)
 
     env = {k: v for k, v in os.environ.items() if not k.startswith(('ISS_', 'SHADPS4_', 'BB_'))}

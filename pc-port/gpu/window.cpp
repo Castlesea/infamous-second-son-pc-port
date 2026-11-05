@@ -21,6 +21,41 @@ namespace Gdiplus { using std::min; using std::max; }
 #include "sdl_window.h"
 #include "visual_capture.h"
 namespace iss::save_ui { bool OnEvent(const SDL_Event& e); }
+// Why the game closes (EXIT_REASON lines): the window messages that end it, who sent a WM_CLOSE
+// (this thread: the X button or Alt+F4; another thread or process), the console control events
+// and the session end. The game once closed by itself with no crash (2026-10-19 20:36) and the
+// log could not tell why.
+namespace {
+WNDPROC g_exit_next_proc{};
+void ExitReason(const char* what,unsigned long long a=0,unsigned long long b=0){
+    std::fprintf(stderr,"EXIT_REASON %s a=0x%llx b=0x%llx tick_ms=%llu\n",what,a,b,
+                 (unsigned long long)SDL_GetTicks());
+    std::fflush(stderr);
+}
+LRESULT CALLBACK ExitWatchProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
+    switch(msg){
+    case WM_CLOSE:{
+        const DWORD from=InSendMessageEx(nullptr);
+        ExitReason((from&ISMEX_SEND)?"wm_close_sent_by_other_thread_or_process":"wm_close_this_thread",
+                   from,(unsigned long long)GetAsyncKeyState(VK_MENU)&0x8000);
+        break;}
+    case WM_SYSCOMMAND:
+        if((wp&0xFFF0)==SC_CLOSE)ExitReason("sc_close",wp,lp);
+        break;
+    case WM_SYSKEYDOWN:
+        if(wp==VK_F4)ExitReason("alt_f4");
+        break;
+    case WM_QUERYENDSESSION:ExitReason("query_end_session",wp,lp);break;
+    case WM_ENDSESSION:ExitReason("end_session",wp,lp);break;
+    case WM_DESTROY:ExitReason("wm_destroy");break;
+    }
+    return CallWindowProcW(g_exit_next_proc,hwnd,msg,wp,lp);
+}
+BOOL WINAPI ExitConsoleCtrl(DWORD type){
+    ExitReason("console_ctrl",type);
+    return FALSE; // the handlers before this one (the CRT's SIGINT, SDL's quit) still run
+}
+}
 namespace Frontend {
 WindowSDL::WindowSDL(s32 w,s32 h,const char *title):width{w},height{h},base_title{title}{
     if(!SDL_InitSubSystem(SDL_INIT_VIDEO))throw std::runtime_error(SDL_GetError());
@@ -43,6 +78,11 @@ WindowSDL::WindowSDL(s32 w,s32 h,const char *title):width{w},height{h},base_titl
     const auto properties=SDL_GetWindowProperties(window);
     window_info.type=WindowSystemType::Windows;
     window_info.render_surface=SDL_GetPointerProperty(properties,SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr);
+    // EXIT_REASON: after SDL (its console handler is registered first, so this one runs first).
+    if(HWND hwnd=static_cast<HWND>(window_info.render_surface);hwnd&&!g_exit_next_proc)
+        g_exit_next_proc=reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(&ExitWatchProc)));
+    SetConsoleCtrlHandler(&ExitConsoleCtrl,TRUE);
     window_info.display_connection=nullptr; // Vulkan's Windows surface path uses the HWND.
     window_info.render_surface_scale=SDL_GetWindowDisplayScale(window);
 }
@@ -57,7 +97,10 @@ bool WindowSDL::PollEvents(){SDL_Event e;while(SDL_PollEvent(&e)){
         }
         if(e.key.key==SDLK_F9){bool show=!iss_show_fps.load();iss_show_fps.store(show);std::fprintf(stderr,"FPS_OVERLAY visible=%d tick_ms=%llu\n",show,(unsigned long long)SDL_GetTicks());}
         if(e.key.key==SDLK_F10){iss::timeline::Emit("user_stutter_mark",0,0,SDL_GetTicks());std::fprintf(stderr,"PERF_MARK tick_ms=%llu\n",(unsigned long long)SDL_GetTicks());std::fflush(stderr);if(iss::visual_capture::Enabled())iss::visual_capture::Start(SDL_GetTicksNS());}}
-    if(e.type==SDL_EVENT_QUIT||e.type==SDL_EVENT_WINDOW_CLOSE_REQUESTED)is_open=false;
+    if(e.type==SDL_EVENT_QUIT||e.type==SDL_EVENT_WINDOW_CLOSE_REQUESTED){
+        if(is_open)ExitReason(e.type==SDL_EVENT_QUIT?"sdl_quit":"sdl_window_close_requested");
+        is_open=false;
+    }
     if(e.type==SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED){width=e.window.data1;height=e.window.data2;}}
     return is_open;
 }

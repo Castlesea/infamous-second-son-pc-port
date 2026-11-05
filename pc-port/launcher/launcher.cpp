@@ -447,8 +447,8 @@ const char* const kGameEnvironment[][2] = {
     {"ISS_FEEDBACK_IDENTITY", "0"}, {"ISS_FEEDBACK_JOIN", "0"}, {"ISS_FEEDBACK_PAGE_READBACK", "0"},
     {"ISS_FEEDBACK_TRACE", "0"}, {"ISS_G4_FEEDBACK_PROBE", "0"}, {"ISS_GPU", "1"},
     {"ISS_GPU_HAZARD_DIAG", "0"}, {"ISS_GPU_PROFILE", "0"}, {"ISS_HYBRID_BENCH_HIDDEN", "0"},
-    {"ISS_HYBRID_FAMILY_PROFILE", "0"}, {"ISS_INDIRECT_GUARD", "0"}, {"ISS_LAZY_PIPELINES", "1"},
-    {"ISS_MAPPING_CACHE", "1"}, {"ISS_MAPPING_INDEX", "1"}, {"ISS_MINIMAL_LOGS", "0"},
+    {"ISS_HYBRID_FAMILY_PROFILE", "0"}, {"ISS_LAZY_PIPELINES", "1"},
+    {"ISS_MAPPING_CACHE", "1"}, {"ISS_MAPPING_INDEX", "1"}, 
     {"ISS_NATIVE_CITY_FETCH", "0"}, {"ISS_NATIVE_CPU_DRAWS", "0"}, {"ISS_NATIVE_DEPTH_RUN", "0"},
     {"ISS_NATIVE_DRAW_STATE", "0"}, {"ISS_NATIVE_DRAW_STATE_VERIFY", "0"},
     {"ISS_NATIVE_FEEDBACK_PROBE", "0"}, {"ISS_NATIVE_GBUFFER_SETS", "1"},
@@ -463,7 +463,7 @@ const char* const kGameEnvironment[][2] = {
     {"ISS_PIPELINE_EVENTS", "0"}, {"ISS_PIPELINE_STATE_REUSE", "0"},
     {"ISS_PIPELINE_STATE_REUSE_STATS", "0"}, {"ISS_PIPELINE_STATE_REUSE_VERIFY", "0"},
     {"ISS_PRELOAD_BACKGROUND", "1"}, {"ISS_PREWARM_LARGE_UPLOAD", "0"},
-    {"ISS_PROBE_HOST_IMPORT", "0"}, {"ISS_PROFILE_CITY_DRAW_GPU", "0"}, {"ISS_READBACK_DIAG", "0"},
+    {"ISS_PROBE_HOST_IMPORT", "0"}, {"ISS_READBACK_DIAG", "0"},
     {"ISS_REAL_OCCLUSION", "1"}, {"ISS_RENDER_REUSE", "1"}, {"ISS_RING_BARRIERS", "1"},
     {"ISS_SECONDARY_BATCH_PROBE", "0"}, {"ISS_SMALL_READ_MEMO", "0"}, {"ISS_SPEC_TRANSLATE", "1"},
     {"ISS_STAGE_MEMO", "1"}, {"ISS_STAGE_MEMO_LOOSE", "1"}, {"ISS_STAGE_MEMO_TEXEL", "1"},
@@ -573,11 +573,47 @@ void RemoveOldCaches(const fs::path& lineage) {
         if (e.path().filename().wstring().rfind(L"old-", 0) == 0) fs::remove_all(e.path(), ec);
 }
 
+// The game using a session's cache: session\.owner holds its process id and creation time
+// (written by LaunchGame). A launcher opened again while that game runs must not touch the
+// folder, and a watcher only finishes its own game's session: on 2026-10-19 a second launcher
+// took a running game's session for a crashed one (rolled it back and renamed it), then the
+// first game's watcher rolled back the second game's cache while it ran.
+struct CacheOwner {
+    DWORD pid = 0;
+    ULONGLONG created = 0;
+};
+CacheOwner ReadCacheOwner(const fs::path& work) {
+    CacheOwner o;
+    std::ifstream(work / ".owner") >> o.pid >> o.created;
+    return o;
+}
+ULONGLONG ProcessCreated(HANDLE process) {
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return 0;
+    return (ULONGLONG(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+}
+void WriteCacheOwner(const fs::path& work, HANDLE process) {
+    std::ofstream(work / ".owner") << GetProcessId(process) << ' ' << ProcessCreated(process);
+}
+bool CacheOwnerAlive(const fs::path& work) {
+    const CacheOwner o = ReadCacheOwner(work);
+    if (!o.pid) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, o.pid);
+    if (!process) return false;
+    DWORD code = 0;
+    const bool alive = GetExitCodeProcess(process, &code) && code == STILL_ACTIVE &&
+                       ProcessCreated(process) == o.created;
+    CloseHandle(process);
+    return alive;
+}
+
 // PLAY: current becomes the session's cache (renamed, so it takes no time however big it is).
+// Empty when a game still runs on the session's cache (it is left alone).
 fs::path PrepareCache(bool library, const std::function<void(float)>& progress = {}) {
     const fs::path lineage = g_user / "shader-cache", current = lineage / "current", work = lineage / "session";
     std::error_code ec;
     const std::string tag = std::to_string(GetTickCount64());
+    if (fs::exists(work, ec) && CacheOwnerAlive(work)) return {};
     if (fs::exists(work, ec)) {
         if (!fs::exists(current, ec)) {
             // A session nobody finished (the PC went off while playing): undone, back to current.
@@ -613,10 +649,13 @@ fs::path PrepareCache(bool library, const std::function<void(float)>& progress =
 // After the game: keeps what a clean session added (to be verified by the next one), undoes a
 // session that did not end cleanly, and undoes an unverified addition when the session after it
 // ended before playing (play_v1_guard.finish_cache). Returns a line for the status bar.
-std::wstring FinishCache(const Session& s) {
+std::wstring FinishCache(const Session& s, DWORD game_pid) {
     const fs::path lineage = g_user / "shader-cache", current = lineage / "current", work = s.cache_work,
                    base = lineage / "base", rollback = lineage / "rollback", marker = work / ".unverified";
     std::error_code ec;
+    // Another game's session now (see CacheOwner): not this one's to finish.
+    if (const CacheOwner o = ReadCacheOwner(work); game_pid && o.pid && o.pid != game_pid) return L"";
+    fs::remove(work / ".owner", ec);
     const auto back = [&] {
         if (work != current) fs::rename(work, current, ec);
         RemoveOldCaches(lineage);
@@ -764,6 +803,7 @@ fs::path MakeGameIcon() {
 }
 
 HANDLE g_game = nullptr;
+DWORD g_game_pid = 0; // the game of g_session (FinishCache)
 Session g_session;
 constexpr UINT WM_GAME_EXIT = WM_APP + 1;
 
@@ -883,6 +923,8 @@ std::wstring LaunchGame(HWND notify) {
     if (!ok) return L"Could not start the game (error " + std::to_wstring(GetLastError()) + L").";
     CloseHandle(pi.hThread);
     g_game = pi.hProcess;
+    g_game_pid = pi.dwProcessId;
+    WriteCacheOwner(g_session.cache_work, pi.hProcess);
     std::thread([notify, process = pi.hProcess] {
         WaitForSingleObject(process, INFINITE);
         DWORD code = 0;
@@ -1176,8 +1218,9 @@ const Color kYellow(255, 245, 166, 28), kYellowHot(255, 255, 190, 60), kText(255
 float S(float v) { return v * g_scale; }
 
 const FontFamily* Family() {
-    static FontFamily fallback(L"Tahoma");
-    return g_oswald ? g_oswald.get() : &fallback;
+    // Never destroyed: a static GDI+ object destroyed after GdiplusShutdown crashes the exit.
+    static const FontFamily* fallback = new FontFamily(L"Tahoma");
+    return g_oswald ? g_oswald.get() : fallback;
 }
 
 void LoadFonts() {
@@ -1338,6 +1381,7 @@ float g_bar_alpha = 0.0f;
 bool g_bar_placed = false;
 std::map<int, float> g_lit;    // per item highlight (0 -> 1)
 std::unique_ptr<Bitmap> g_backdrop;
+std::unique_ptr<Bitmap> g_back_buf, g_layer_buf; // Paint's frame buffers
 int g_backdrop_w = 0, g_backdrop_h = 0;
 bool g_backdrop_fullscreen = false;
 
@@ -1404,7 +1448,8 @@ void Paint(HDC hdc, int width, int height) {
     if (!g_backdrop || g_backdrop_w != width || g_backdrop_h != height || g_backdrop_fullscreen != g_fullscreen)
         BuildBackdrop(width, height, bar);
     // Frame buffers kept across frames (allocating them every frame cost most of the CPU).
-    static std::unique_ptr<Bitmap> back_buf, layer_buf;
+    auto& back_buf = g_back_buf;
+    auto& layer_buf = g_layer_buf;
     if (!back_buf || int(back_buf->GetWidth()) != width || int(back_buf->GetHeight()) != height) {
         back_buf = std::make_unique<Bitmap>(width, height, PixelFormat32bppPARGB);
         layer_buf = std::make_unique<Bitmap>(width, height, PixelFormat32bppPARGB);
@@ -2364,10 +2409,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CACHE_READY: {
         std::unique_ptr<fs::path> work(reinterpret_cast<fs::path*>(lp));
-        g_session.cache_work = *work;
         g_prep_starting = false;
         g_screen = Screen::Main;
         g_focus = HotPlay;
+        if (work->empty()) {
+            // PrepareCache: a game started before still runs on the shader cache.
+            SetStatus(L"The game is already running. Close it before playing again.");
+            return 0;
+        }
+        g_session.cache_work = *work;
         g_cache_ready = true;
         Activate(HotPlay);
         return 0;
@@ -2390,7 +2440,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CloseHandle(g_game);
             g_game = nullptr;
         }
-        const std::wstring cache = FinishCache(g_session);
+        const std::wstring cache = FinishCache(g_session, g_game_pid);
         Restart();
         g_screen = Screen::Main;
         g_focus = HotPlay;
@@ -2444,11 +2494,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             g_session.log_dir = argv[2];
             g_session.cache_work = argv[3];
             g_user = g_session.cache_work.parent_path().parent_path(); // <game's user>\shader-cache\session
-            if (HANDLE game = OpenProcess(SYNCHRONIZE, FALSE, DWORD(_wtoi(argv[4])))) {
+            const DWORD game_pid = DWORD(_wtoi(argv[4]));
+            if (HANDLE game = OpenProcess(SYNCHRONIZE, FALSE, game_pid)) {
                 WaitForSingleObject(game, INFINITE);
                 CloseHandle(game);
             }
-            FinishCache(g_session);
+            FinishCache(g_session, game_pid);
             LocalFree(argv);
             GdiplusShutdown(gdi_token);
             CoUninitialize();
@@ -2508,14 +2559,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if (play_at_start && CheckGameDir(g_game_dir).empty() && PreparedReady()) {
         std::error_code ec;
         g_session.cache_work = PrepareCache(fs::is_regular_file(ShaderLibrary() / "manifest.json", ec));
-        const std::wstring why = LaunchGame(nullptr);
+        const std::wstring why = g_session.cache_work.empty()
+                                     ? L"The game is already running. Close it before playing again."
+                                     : LaunchGame(nullptr);
         DWORD code = 0;
         if (why.empty()) {
             WaitForSingleObject(g_game, INFINITE);
             GetExitCodeProcess(g_game, &code);
             CloseHandle(g_game);
             g_game = nullptr;
-            FinishCache(g_session);
+            FinishCache(g_session, g_game_pid);
         } else {
             MessageBoxW(nullptr, why.c_str(), g_game_info->name, MB_OK | MB_ICONERROR);
         }
@@ -2568,8 +2621,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
+    // Every GDI+ object goes before GdiplusShutdown: one destroyed after it crashed the launcher
+    // at each exit after PLAY (0xc0000005 in ntdll, 2026-10-19).
     g_background.reset();
     g_logo.reset();
+    g_backdrop.reset();
+    g_back_buf.reset();
+    g_layer_buf.reset();
     g_oswald.reset();
     g_fonts.reset();
     GdiplusShutdown(gdi_token);

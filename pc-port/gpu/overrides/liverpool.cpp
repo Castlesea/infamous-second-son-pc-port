@@ -4070,12 +4070,21 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                 if (rasterizer && direct_write_bytes)
                     rasterizer->OnGpuThreadWrite(dst,direct_write_bytes);
             }
+            // The label is the packet's value: with ISS_UNIFIED_MEMORY the write above may be
+            // deferred until the GPU is done, and the memory still holds the old value (recorded
+            // as the CP's label, a later wait on it counted as a guest CPU wait: a needless upload
+            // epoch). Clock and counter values are only known once written.
             switch (release_mem->data_sel.Value()) {
-            case DataSelect::Data32Low:
-                NoteCpWrite(release_mem->Address<VAddr>(), release_mem->Address<const void*>(),
-                            sizeof(u32));
+            case DataSelect::Data32Low: {
+                const u32 value = packet.DataDWord();
+                NoteCpWrite(dst, &value, sizeof(value));
                 break;
-            case DataSelect::Data64:
+            }
+            case DataSelect::Data64: {
+                const u64 value = packet.DataQWord();
+                NoteCpWrite(dst, &value, sizeof(value));
+                break;
+            }
             case DataSelect::GpuClock64:
             case DataSelect::PerfCounter:
                 NoteCpWrite(release_mem->Address<VAddr>(), release_mem->Address<const void*>(),

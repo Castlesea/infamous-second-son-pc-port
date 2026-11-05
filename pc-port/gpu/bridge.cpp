@@ -536,7 +536,11 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             auto last_priority=last_checkpoint-std::chrono::seconds(8);
             for(;;){
                 bool stop=!g_window->PollEvents();auto now=std::chrono::steady_clock::now();
-                if(stop_path&&now-last_stop_check>std::chrono::milliseconds(100)){std::error_code ec;stop|=std::filesystem::exists(stop_path,ec);last_stop_check=now;}
+                if(stop_path&&now-last_stop_check>std::chrono::milliseconds(100)){
+                    std::error_code ec;last_stop_check=now;
+                    if(std::filesystem::exists(stop_path,ec)){
+                        stop=true;std::fputs("EXIT_REASON stop_file\n",stderr);std::fflush(stderr);}
+                }
                 if(stop){
                     if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache();
                     // Our atomic checkpoint replaces the old destructor-only snapshot.

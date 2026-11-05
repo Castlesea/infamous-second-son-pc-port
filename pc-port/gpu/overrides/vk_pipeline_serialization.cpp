@@ -79,6 +79,14 @@ std::unordered_map<u64, std::vector<u32>> recipe_spirv; // permutation hash -> S
 /// ISS_AOT_RECIPE_VERIFY: the stages whose SPIR-V made from the game files is identical to the
 /// cached one (written to ISS_AOT_RECIPE_VERIFIED for make_recipes.py: recipes keep only those).
 std::vector<u64> recipe_verified;
+/// Library and cache never mix inside one shader program: its permutations share the Info of the
+/// first one loaded, and permutation indices are local to a lineage. A program the cache has is
+/// the cache's (the library's stages of it are left out), one only the library has is the
+/// library's. A cache program given a library permutation made pipelines that crashed the driver
+/// (0xC0000409 in the preload, 2026-10-19). WarmUp is serial; program_cache_mutex guards these.
+bool g_stage_from_library = false;
+std::unordered_set<u64> g_library_programs;
+u32 g_library_stages_left = 0, g_cache_stages_left = 0;
 } // Anonymous namespace
 
 void SetComputeShaderVariant(u32 variant) {
@@ -224,11 +232,15 @@ bool PipelineCache::LoadCachedPipelineStage(u64 hash, size_t stage) {
     // Storage is read-only during WarmUp. Repeated keys resolve to the same
     // validated metadata/SPIR-V; retain an index, not a vector element pointer.
     std::vector<u8> meta_blob;
-    if (!iss::pipeline_library::Read(fmt::format("{:#018x}.meta", hash), meta_blob))
+    const bool from_library =
+        iss::pipeline_library::Read(fmt::format("{:#018x}.meta", hash), meta_blob);
+    if (!from_library)
         Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
                                           fmt::format("{:#018x}", hash), meta_blob);
     if (meta_blob.empty()) return false;
     Serialization::Archive meta_ar{std::move(meta_blob)};
+    g_stage_from_library = from_library;
+    SCOPE_EXIT { g_stage_from_library = false; };
     return LoadPipelineStage(meta_ar, stage, hash);
 }
 
@@ -358,6 +370,16 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
                     expected_hash);
         return false;
     }
+    {
+        // A program of the other source (see g_library_programs): before any SPIR-V of this
+        // stage is made or stored.
+        std::unique_lock lock{program_cache_mutex};
+        if ((program_cache.count(program->info.pgm_hash) != 0) &&
+            g_library_programs.contains(program->info.pgm_hash) != g_stage_from_library) {
+            ++(g_stage_from_library ? g_library_stages_left : g_cache_stages_left);
+            return false;
+        }
+    }
 
     std::vector<u32> spv{};
     std::vector<u8> bytes;
@@ -422,6 +444,24 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     if (spv.empty()) {
         return false;
     }
+    // ISS_COMPILE_TRACE=1 (diagnosis): each stage's module creation, flushed (see the pipeline
+    // compile trace in vk_graphics_pipeline.cpp).
+    static const bool stage_trace = [] {
+        const char* p = std::getenv("ISS_COMPILE_TRACE");
+        return p && p[0] == '1';
+    }();
+    if (stage_trace) {
+        std::fprintf(stderr, "STAGE_BEGIN hash=%llx pgm=%llx perm=%zu library=%d words=%zu\n",
+                     (unsigned long long)expected_hash, (unsigned long long)program->info.pgm_hash,
+                     perm_idx, int(g_stage_from_library), spv.size());
+        std::fflush(stderr);
+    }
+    SCOPE_EXIT {
+        if (stage_trace) {
+            std::fputs("STAGE_END\n", stderr);
+            std::fflush(stderr);
+        }
+    };
 
     // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
     // at the exact position rather than append
@@ -430,6 +470,9 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
 
     // The scout thread looks programs and their permutations up meanwhile.
     std::unique_lock lock{program_cache_mutex};
+    if (g_stage_from_library && !(program_cache.count(program->info.pgm_hash) != 0)) {
+        g_library_programs.insert(program->info.pgm_hash);
+    }
     auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
     if (new_program) {
         { std::vector<u32> salted; module = CompileSPV(iss::shader_salt::Apply(spv, salted), instance.GetDevice()); }
@@ -680,6 +723,10 @@ void PipelineCache::WarmUp() {
         }
     }
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
+    if (library_ready)
+        std::fprintf(stderr, "PIPELINE_LIBRARY programs=%zu library_stages_left_to_cache=%u "
+                     "cache_stages_left_to_library=%u\n", g_library_programs.size(),
+                     g_library_stages_left, g_cache_stages_left);
     for (int stage = 0; stage < 6; ++stage) {
         const auto& st = recipe_stats[stage];
         if (st.made + st.matched + st.mismatched + st.failed + st.recovered == 0) continue;

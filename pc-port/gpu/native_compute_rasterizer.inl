@@ -573,7 +573,13 @@ bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick,
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecSubmit};
     using namespace NativeCompute;
     auto& c = stats;
-    if ((++c.report & 1023) == 1) Report();
+    // Every 10 s at most (was every 1024 segments: ~200 lines a second on this thread).
+    static u64 last_report_ns = 0;
+    ++c.report;
+    if (const u64 now = Common::Perf::NowNs(); now - last_report_ns >= 10'000'000'000ull) {
+        last_report_ns = now;
+        Report();
+    }
     c.asc_calls += asc;
     const auto reject = [&](Reject why) {
         ++c.reject[why];
@@ -1068,7 +1074,8 @@ void Rasterizer::NativeComputeLearn(u64 key, const ComputePipeline* pipeline,
         tables.templates[t->key] = std::move(t);
     }
     ++c.learned;
-    {
+    // The first templates one by one, then every 256th (4453 lines in an 8 minute session).
+    if (order < 64 || order % 256 == 0) {
         std::fprintf(stderr,
                      "NATIVE_COMPUTE_TEMPLATE order=%u key=%llx program=%llx pgm_hash=%llx walker=%d "
                      "flat_words=%u buffers=%zu written=%u images=%zu samplers=%zu\n",
