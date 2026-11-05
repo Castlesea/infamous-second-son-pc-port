@@ -2285,6 +2285,8 @@ bool Rasterizer::TryFastDraw(bool is_indexed, u32 index_offset) {
             if (dyn_update || reentry) {
                 UpdateDynamicState(pipeline, is_indexed);
                 ++stats.dyn_updates;
+            } else if (iss::dlss::UpscaleWanted()) [[unlikely]] {
+                UpdateColorBlendingState(pipeline);
             }
             scheduler.BeginRendering(state);
             const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs, fetch);
@@ -2396,6 +2398,8 @@ bool Rasterizer::TryFastDraw(bool is_indexed, u32 index_offset) {
         // Dynamic state registers changed (or a feedback loop): derived again from them.
         UpdateDynamicState(pipeline, is_indexed);
         ++stats.dyn_updates;
+    } else if (iss::dlss::UpscaleWanted()) [[unlikely]] {
+        UpdateColorBlendingState(pipeline);
     }
     scheduler.BeginRendering(state);
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs, fetch);

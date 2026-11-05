@@ -789,7 +789,14 @@ static void DrawDynamicState(const AmdGpu::Regs& regs, const Instance& instance,
     dynamic_state.SetFrontFace(LiverpoolToVK::FrontFace(regs.polygon_control.front_face));
     dynamic_state.SetLineWidth(regs.line_control.Width());
     dynamic_state.SetBlendConstants(regs.blend_constants);
-    dynamic_state.SetColorWriteMasks(pipeline.GetGraphicsKey().write_masks);
+    if (iss::dlss::UpscaleWanted()) [[unlikely]] {
+        // D2: HUD draws recorded by the engine threads also write the layer's alpha.
+        auto masks = pipeline.GetGraphicsKey().write_masks;
+        iss::dlss::ApplyHudLayerMask(masks, regs.color_buffers[0].Address(), 1);
+        dynamic_state.SetColorWriteMasks(masks);
+    } else {
+        dynamic_state.SetColorWriteMasks(pipeline.GetGraphicsKey().write_masks);
+    }
     dynamic_state.SetAttachmentFeedbackLoopEnabled(false);
 }
 

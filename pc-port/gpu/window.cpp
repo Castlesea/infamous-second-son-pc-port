@@ -20,6 +20,7 @@ namespace Gdiplus { using std::min; using std::max; }
 #include "runtime_timeline.h"
 #include "sdl_window.h"
 #include "visual_capture.h"
+#include "iss_dlss.h"
 namespace iss::save_ui { bool OnEvent(const SDL_Event& e); }
 // Why the game closes (EXIT_REASON lines): the window messages that end it, who sent a WM_CLOSE
 // (this thread: the X button or Alt+F4; another thread or process), the console control events
@@ -95,6 +96,7 @@ bool WindowSDL::PollEvents(){SDL_Event e;while(SDL_PollEvent(&e)){
             if(!SDL_SetWindowFullscreen(window,!fullscreen))
                 std::fprintf(stderr,"WINDOW_MODE toggle failed: %s\n",SDL_GetError());
         }
+        if(e.key.key==SDLK_HOME&&iss::dlss::Mode()==1){const bool on=!iss::dlss::g_user_on.load();iss::dlss::g_user_on.store(on);std::fprintf(stderr,"DLSS user %s (ready %d) tick_ms=%llu\n",on?"on":"off",int(iss::dlss::g_ready.load()),(unsigned long long)SDL_GetTicks());}
         if(e.key.key==SDLK_F9){bool show=!iss_show_fps.load();iss_show_fps.store(show);std::fprintf(stderr,"FPS_OVERLAY visible=%d tick_ms=%llu\n",show,(unsigned long long)SDL_GetTicks());}
         if(e.key.key==SDLK_F10){iss::timeline::Emit("user_stutter_mark",0,0,SDL_GetTicks());std::fprintf(stderr,"PERF_MARK tick_ms=%llu\n",(unsigned long long)SDL_GetTicks());std::fflush(stderr);if(iss::visual_capture::Enabled())iss::visual_capture::Start(SDL_GetTicksNS());}}
     if(e.type==SDL_EVENT_QUIT||e.type==SDL_EVENT_WINDOW_CLOSE_REQUESTED){

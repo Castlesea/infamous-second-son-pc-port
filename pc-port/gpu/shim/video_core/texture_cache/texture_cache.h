@@ -381,6 +381,17 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// ISS_DLSS (iss_dlss.h): the images that start at `address` (the address index); command
+    /// processor thread, as FindImageFromRange.
+    template <typename Func>
+    void ForEachImageAt(VAddr address, Func&& func) {
+        if (const auto it = image_address_index.find(address); it != image_address_index.end()) {
+            for (const ImageId image_id : it->second) {
+                func(image_id, slot_images[image_id]);
+            }
+        }
+    }
+
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;
