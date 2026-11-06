@@ -126,7 +126,7 @@ std::vector<Setting> g_settings = {
     // Its hint and choices are those of the game folder's edition (kEditions, ApplyEdition).
     {"language", L"Language", L"", {}, TabGame},
     // src/pad.c, controllers without a gyro or a touchpad (ISS_PAD_STICK_SPRAY, ISS_PAD_STICK_SWIPE).
-    {"stick_spray", L"Spray can on the right stick", L"No gyro: L3+R3 holds it (the mouse too), stick aims, A shakes, RB recenters.",
+    {"stick_spray", L"Spray can on L3 + R3", L"L3+R3: turn on its side and shake (gyro: shake). No gyro: stick aims; B or L3+R3 held ends it.",
      {{L"On", "1"}, {L"Off", "0"}}, TabGame},
     {"stick_swipe", L"Touchpad swipes on the right stick", L"Hold a touchpad button (View) and push the stick to swipe.",
      {{L"On", "1"}, {L"Off", "0"}}, TabGame},
@@ -1857,8 +1857,9 @@ void Paint(HDC hdc, int width, int height) {
                 L"shake it, hold the left button to spray. Shift: fine aim. Middle button: recenter. F7 again "
                 L"ends it.\n\n"
                 L"Keyboard: Space / Backspace press the left / right side of the touchpad, F8 both, 1-4 swipe.\n\n"
-                L"Controller without a gyro: L3+R3 holds it as the spray can with F7 (right stick aims, A shakes, RB "
-                L"recenters, R2 sprays). Hold View and push the right stick to swipe the touchpad.",
+                L"Spray can: L3+R3 turns the controller on its side and shakes it; again to shake again. Without a "
+                L"gyro the right stick then aims and R2 sprays; B, L3+R3 held, walking or 8 s without spraying ends it. Hold View and push "
+                L"the right stick to swipe the touchpad.",
                 -1, &hint, RectF(box.X + S(16), box.Y + S(36), box.Width - S(32), box.Height - S(44)), nullptr,
                 &text_brush);
         }
