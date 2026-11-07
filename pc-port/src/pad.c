@@ -240,11 +240,21 @@ static DWORD WINAPI pad_io_main(void *unused){
             SetWaitableTimer(timer,&due,0,NULL,NULL,FALSE);HANDLE wait[2]={timer,pad_wake};WaitForMultipleObjects(2,wait,FALSE,INFINITE);}
         else WaitForSingleObject(pad_wake,2);}
 }
+// The save dialog (gpu/save_dialog_ui.cpp) runs in iss-gpu.dll, whose own static SDL never opens the
+// game's controller: it reads the game's last snapshot here (looked up with GetProcAddress on the exe).
+// Returns the SDL_GamepadButton bits (0: no controller); axes: left stick x, y; playstation: a DualShock 4
+// or DualSense (Cross / Circle prompts).
+__declspec(dllexport) uint64_t iss_pad_dialog_state(int16_t axes[2],int *playstation){
+    PadSnapshot s;AcquireSRWLockShared(&snap_lock);s=pad_snap;ReleaseSRWLockShared(&snap_lock);
+    if(axes){axes[0]=s.connected?s.axes[SDL_GAMEPAD_AXIS_LEFTX]:0;axes[1]=s.connected?s.axes[SDL_GAMEPAD_AXIS_LEFTY]:0;}
+    if(playstation)*playstation=s.connected&&(s.type==SDL_GAMEPAD_TYPE_PS4||s.type==SDL_GAMEPAD_TYPE_PS5);
+    return s.connected?s.buttons:0;
+}
 static int read_sdl(PadData *out,int contacts[2],uint16_t xy[2][2]){
     if(!sdl_ready)return 0;
     PadSnapshot s;
     if(pad_thread_mode){AcquireSRWLockShared(&snap_lock);s=pad_snap;ReleaseSRWLockShared(&snap_lock);}
-    else pad_io_step(&s);
+    else{pad_io_step(&s);AcquireSRWLockExclusive(&snap_lock);pad_snap=s;ReleaseSRWLockExclusive(&snap_lock);}
     static uint32_t seen_generation;
     if(s.generation!=seen_generation){seen_generation=s.generation;
         memset(was_touch,0,sizeof(was_touch));memset(quaternion,0,sizeof(quaternion));quaternion[3]=1;sensor_tick=0;}
