@@ -2203,7 +2203,7 @@ void Navigate(Nav nav) {
     Redraw();
 }
 
-// Controllers (XInput, loaded at run time: xinput1_4 on Windows and Proton).
+// Controllers: XInput (loaded at run time: xinput1_4 on Windows and Proton) and SDL (below).
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 XInputGetStateFn g_xinput = nullptr;
 void LoadXInput() {
@@ -2214,12 +2214,127 @@ void LoadXInput() {
         }
 }
 
+// Controllers XInput doesn't list (2026-11-07): a DualSense or DualShock 4 (real, or the virtual one
+// DSZ / DS4Windows present), Switch and generic pads. Read through the game's own bin\SDL3.dll, loaded
+// at run time; XInput stays as before and both are combined. SDL's controller subsystem is shut down
+// while the game runs, so only the game talks to the controller.
+namespace sdlpad {
+using Gamepad = void;
+bool loaded = false, active = false;
+bool (*InitSubSystem)(uint32_t) = nullptr;
+void (*QuitSubSystem)(uint32_t) = nullptr;
+bool (*SetHint)(const char*, const char*) = nullptr;
+void (*SetGamepadEventsEnabled)(bool) = nullptr;
+void (*SetJoystickEventsEnabled)(bool) = nullptr;
+void (*UpdateGamepads)() = nullptr;
+uint32_t* (*GetGamepads)(int*) = nullptr;
+void (*Free)(void*) = nullptr;
+Gamepad* (*OpenGamepad)(uint32_t) = nullptr;
+void (*CloseGamepad)(Gamepad*) = nullptr;
+bool (*GamepadConnected)(Gamepad*) = nullptr;
+bool (*GetGamepadButton)(Gamepad*, int) = nullptr;
+int16_t (*GetGamepadAxis)(Gamepad*, int) = nullptr;
+struct Open { uint32_t id; Gamepad* pad; };
+std::vector<Open> pads;
+ULONGLONG scan_at = 0;
+constexpr uint32_t kInitGamepad = 0x00002000u;  // SDL_INIT_GAMEPAD
+}  // namespace sdlpad
+
+void LoadSdlPads() {
+    using namespace sdlpad;
+    HMODULE dll = LoadLibraryExW((g_bin / L"SDL3.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!dll) return;
+    bool ok = true;
+    auto get = [&](auto& fn, const char* name) {
+        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(reinterpret_cast<void*>(GetProcAddress(dll, name)));
+        ok = ok && fn != nullptr;
+    };
+    get(InitSubSystem, "SDL_InitSubSystem");
+    get(QuitSubSystem, "SDL_QuitSubSystem");
+    get(SetHint, "SDL_SetHint");
+    get(SetGamepadEventsEnabled, "SDL_SetGamepadEventsEnabled");
+    get(SetJoystickEventsEnabled, "SDL_SetJoystickEventsEnabled");
+    get(UpdateGamepads, "SDL_UpdateGamepads");
+    get(GetGamepads, "SDL_GetGamepads");
+    get(Free, "SDL_free");
+    get(OpenGamepad, "SDL_OpenGamepad");
+    get(CloseGamepad, "SDL_CloseGamepad");
+    get(GamepadConnected, "SDL_GamepadConnected");
+    get(GetGamepadButton, "SDL_GetGamepadButton");
+    get(GetGamepadAxis, "SDL_GetGamepadAxis");
+    loaded = ok;
+}
+
+// Starts SDL's controller subsystem in the menus and stops it while the game runs.
+void SetSdlPadsActive(bool on) {
+    using namespace sdlpad;
+    if (!loaded || on == active) return;
+    if (on) {
+        SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");  // the window is not SDL's
+        SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
+        if (!InitSubSystem(kInitGamepad)) return;
+        SetGamepadEventsEnabled(false);  // polled below; nothing reads SDL's event queue
+        SetJoystickEventsEnabled(false);
+        scan_at = 0;
+        active = true;
+    } else {
+        for (auto& o : pads) CloseGamepad(o.pad);
+        pads.clear();
+        QuitSubSystem(kInitGamepad);
+        active = false;
+    }
+}
+
+// The buttons of every SDL controller, as XInput bits (the left stick also acts as the D-pad).
+WORD ReadSdlPads() {
+    using namespace sdlpad;
+    if (!active) return 0;
+    UpdateGamepads();
+    for (size_t i = 0; i < pads.size();) {
+        if (GamepadConnected(pads[i].pad)) { ++i; continue; }
+        CloseGamepad(pads[i].pad);
+        pads.erase(pads.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (now >= scan_at) {
+        scan_at = now + 1000;
+        int count = 0;
+        if (uint32_t* ids = GetGamepads(&count)) {
+            for (int i = 0; i < count; ++i) {
+                const bool known = std::any_of(pads.begin(), pads.end(), [&](const Open& o) { return o.id == ids[i]; });
+                if (!known)
+                    if (Gamepad* g = OpenGamepad(ids[i])) pads.push_back({ids[i], g});
+            }
+            Free(ids);
+        }
+    }
+    // SDL_GamepadButton: south, east, west, north, back, guide, start, left stick, right stick,
+    // left shoulder, right shoulder, D-pad up, down, left, right.
+    static constexpr WORD bits[15] = {XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_BACK, 0, XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB,
+        XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_DPAD_UP,
+        XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT};
+    WORD b = 0;
+    for (auto& o : pads) {
+        for (int i = 0; i < 15; ++i)
+            if (bits[i] && GetGamepadButton(o.pad, i)) b |= bits[i];
+        constexpr int16_t dead = 16000;
+        const int16_t x = GetGamepadAxis(o.pad, 0), y = GetGamepadAxis(o.pad, 1);  // SDL: +y is down
+        if (y < -dead) b |= XINPUT_GAMEPAD_DPAD_UP;
+        if (y > dead) b |= XINPUT_GAMEPAD_DPAD_DOWN;
+        if (x < -dead) b |= XINPUT_GAMEPAD_DPAD_LEFT;
+        if (x > dead) b |= XINPUT_GAMEPAD_DPAD_RIGHT;
+    }
+    return b;
+}
+
 void PollPads() {
-    if (!g_xinput || g_screen == Screen::Running || GetForegroundWindow() != g_hwnd) return;
+    SetSdlPadsActive(g_screen != Screen::Running);
+    if ((!g_xinput && !sdlpad::active) || g_screen == Screen::Running || GetForegroundWindow() != g_hwnd) return;
     static WORD previous = 0;
     static ULONGLONG repeat_at = 0;
-    WORD buttons = 0;
-    for (DWORD i = 0; i < 4; ++i) {
+    WORD buttons = ReadSdlPads();
+    for (DWORD i = 0; g_xinput && i < 4; ++i) {
         XINPUT_STATE st{};
         if (g_xinput(i, &st) != ERROR_SUCCESS) continue;
         WORD b = st.Gamepad.wButtons;
@@ -2588,6 +2703,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     LoadFonts();
     LoadXInput();
+    LoadSdlPads();
     if (CheckGameDir(g_game_dir).empty()) {
         LoadArt();
         ApplyExeIcon();

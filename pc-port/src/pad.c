@@ -33,9 +33,10 @@ static int sdl_ready;
 static int swipe_direction=-1,swipe_keys[4];
 static uint64_t swipe_started;
 static uint32_t pad_generation;
+static volatile LONG pad_playstation; // the selected controller is a DualShock 4 / DualSense (rumble defaults)
 static void scan_gamepads(void){
     uint64_t now=SDL_GetTicks();
-    if(sdl_pad&&!SDL_GamepadConnected(sdl_pad)){fprintf(stderr,"PAD disconnected\n");SDL_CloseGamepad(sdl_pad);sdl_pad=NULL;scan_tick=0;}
+    if(sdl_pad&&!SDL_GamepadConnected(sdl_pad)){fprintf(stderr,"PAD disconnected\n");InterlockedExchange(&pad_playstation,0);SDL_CloseGamepad(sdl_pad);sdl_pad=NULL;scan_tick=0;}
     if(scan_tick&&now-scan_tick<1000)return;scan_tick=now;
     int count=0;SDL_JoystickID *ids=SDL_GetGamepads(&count);SDL_JoystickID chosen=0;int score=-1;
     for(int i=0;i<count;++i){SDL_GamepadType type=SDL_GetGamepadTypeForID(ids[i]);int s=(type==SDL_GAMEPAD_TYPE_PS4||type==SDL_GAMEPAD_TYPE_PS5)?2:1;
@@ -44,6 +45,7 @@ static void scan_gamepads(void){
     if(!chosen||(sdl_pad&&SDL_GetGamepadID(sdl_pad)==chosen))return;
     SDL_Gamepad *next=SDL_OpenGamepad(chosen);if(!next){fprintf(stderr,"PAD open failed: %s\n",SDL_GetError());return;}
     if(sdl_pad)SDL_CloseGamepad(sdl_pad);sdl_pad=next;
+    {const SDL_GamepadType t=SDL_GetGamepadType(next);InterlockedExchange(&pad_playstation,t==SDL_GAMEPAD_TYPE_PS4||t==SDL_GAMEPAD_TYPE_PS5);}
     ++pad_generation; // read_sdl resets its touch and motion state for the new controller
     bool gyro=SDL_SetGamepadSensorEnabled(next,SDL_SENSOR_GYRO,true);
     bool accel=SDL_SetGamepadSensorEnabled(next,SDL_SENSOR_ACCEL,true);
@@ -51,8 +53,8 @@ static void scan_gamepads(void){
     // pad_accel_gain). ISS_PAD_ACCEL_GAIN sets the gain for any controller (1: as measured).
     const char *g=getenv("ISS_PAD_ACCEL_GAIN");accel_gain=g?(float)atof(g):SDL_GetGamepadVendor(next)==0x28de?2.f:1.f;
     if(!(accel_gain>0))accel_gain=1;
-    fprintf(stderr,"PAD selected name=%s joystick=%s type=%d vendor=%04x product=%04x touchpads=%d gyro=%d (%.0f Hz) accel=%d (%.0f Hz) accel_gain=%.1f, %d gamepads\n",
-        SDL_GetGamepadName(next),SDL_GetJoystickName(SDL_GetGamepadJoystick(next)),(int)SDL_GetGamepadType(next),SDL_GetGamepadVendor(next),SDL_GetGamepadProduct(next),SDL_GetNumGamepadTouchpads(next),
+    fprintf(stderr,"PAD selected name=%s joystick=%s type=%d vendor=%04x product=%04x firmware=%04x touchpads=%d gyro=%d (%.0f Hz) accel=%d (%.0f Hz) accel_gain=%.1f, %d gamepads\n",
+        SDL_GetGamepadName(next),SDL_GetJoystickName(SDL_GetGamepadJoystick(next)),(int)SDL_GetGamepadType(next),SDL_GetGamepadVendor(next),SDL_GetGamepadProduct(next),SDL_GetGamepadFirmwareVersion(next),SDL_GetNumGamepadTouchpads(next),
         gyro,SDL_GetGamepadSensorDataRate(next,SDL_SENSOR_GYRO),accel,SDL_GetGamepadSensorDataRate(next,SDL_SENSOR_ACCEL),accel_gain,count);
 }
 static uint16_t touch_coord(float v,unsigned maximum){if(!isfinite(v)||v<0)v=0;if(v>1)v=1;return (uint16_t)(v*(float)maximum);}
@@ -619,11 +621,35 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         out->connected=out->connected_count=1;out->timestamp=ts;}
     ReleaseSRWLockExclusive(&lock);return 0;
 }
+// The game's motors (ScePadVibrationParam: large, small) drive SDL's heavy (low frequency) and light
+// motors. 2026-11-07: a DualSense renders them through its rumble emulation, and the game drives mostly
+// the light motor (DSZ: heavy 0, light 90), a faint buzz. ISS_PAD_RUMBLE_GAIN=<percent> (0-400) scales
+// both; ISS_PAD_RUMBLE_BLEND=<percent> (0-100) lets the light motor drive the heavy one too (heavy =
+// max(large, small * blend)). Defaults (2026-11-08, tested on a DualSense): blend 60 (the game never
+// drives the large motor, so without it only the light motor ever runs, on any controller); gain 150 on
+// a DualShock 4 / DualSense, 100 otherwise. "PAD rumble 5s" lines (with activity only): what the game
+// asked for and what was sent.
+static int rumble_setting(const char *name,int fallback,int lo,int hi){const char *v=getenv(name);int n=v&&*v?atoi(v):fallback;return n<lo?lo:n>hi?hi:n;}
 static int32_t GUEST_ABI pad_vibration(int handle,const uint8_t *motors){
     if(handle!=1||!opened)return error(3);if(!motors)return error(1);
+    static int env_gain=-2,blend,last_gain=-1;
+    if(env_gain==-2){env_gain=rumble_setting("ISS_PAD_RUMBLE_GAIN",-1,-1,400);blend=rumble_setting("ISS_PAD_RUMBLE_BLEND",60,0,100);}
+    const int gain=env_gain>=0?env_gain:pad_playstation?150:100;
+    if(gain!=last_gain){last_gain=gain;fprintf(stderr,"PAD rumble gain=%d%% blend=%d%%\n",gain,blend);}
+    const unsigned large=motors[0],small=motors[1],mix=small*(unsigned)blend/100;
+    unsigned heavy=(large>mix?large:mix)*(unsigned)gain/100,light=small*(unsigned)gain/100;
+    if(heavy>255)heavy=255;if(light>255)light=255;
     AcquireSRWLockExclusive(&lock);
-    if(sdl_ready&&pad_connected)request_rumble((Uint16)(motors[0]*257),(Uint16)(motors[1]*257),1000,0);
-    else{XINPUT_VIBRATION v={(WORD)(motors[0]*257),(WORD)(motors[1]*257)};XInputSetState(0,&v);}
+    static uint64_t window;static unsigned calls,max_large,max_small,max_heavy,max_light;
+    const uint64_t now=GetTickCount64();if(!window)window=now;++calls;
+    if(large>max_large)max_large=large;if(small>max_small)max_small=small;
+    if(heavy>max_heavy)max_heavy=heavy;if(light>max_light)max_light=light;
+    if(now-window>=5000){
+        if(max_large||max_small)fprintf(stderr,"PAD rumble 5s: calls=%u game large<=%u small<=%u sent heavy<=%u light<=%u%s\n",
+            calls,max_large,max_small,max_heavy,max_light,sdl_ready&&pad_connected?"":" (XInput)");
+        window=now;calls=max_large=max_small=max_heavy=max_light=0;}
+    if(sdl_ready&&pad_connected)request_rumble((Uint16)(heavy*257),(Uint16)(light*257),1000,0);
+    else{XINPUT_VIBRATION v={(WORD)(heavy*257),(WORD)(light*257)};XInputSetState(0,&v);}
     ReleaseSRWLockExclusive(&lock);return 0;
 }
 static uint8_t lightbar[4];
