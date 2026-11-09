@@ -72,6 +72,7 @@ State& S() {
 
 ImFont* g_regular = nullptr;
 ImFont* g_bold = nullptr;
+bool g_playstation = false;  // the game's controller is a DualShock 4 / DualSense: Cross / Circle prompts
 std::atomic<bool> g_active{false};
 
 double Now() { return double(SDL_GetTicksNS()) / 1e9; }
@@ -157,8 +158,17 @@ float Prompt(ImDrawList* dl, ImVec2 at, const char* glyph, const char* label, fl
     const float r = 13 * k;
     const ImVec2 c(at.x + r, at.y + r);
     dl->AddCircleFilled(c, r, Col(235, 238, 245, alpha), 24);
-    const ImVec2 gs = g_bold->CalcTextSizeA(18 * k, FLT_MAX, 0, glyph);
-    dl->AddText(g_bold, 18 * k, ImVec2(c.x - gs.x / 2, c.y - gs.y / 2), Col(12, 18, 28, alpha), glyph);
+    const ImU32 ink = Col(12, 18, 28, alpha);
+    if (g_playstation && !std::strcmp(glyph, "A")) {  // Cross, drawn (no font has the PS symbols)
+        const float d = 5.5f * k;
+        dl->AddLine(ImVec2(c.x - d, c.y - d), ImVec2(c.x + d, c.y + d), ink, 2.2f * k);
+        dl->AddLine(ImVec2(c.x - d, c.y + d), ImVec2(c.x + d, c.y - d), ink, 2.2f * k);
+    } else if (g_playstation && !std::strcmp(glyph, "B")) {  // Circle
+        dl->AddCircle(c, 6.5f * k, ink, 20, 2.2f * k);
+    } else {
+        const ImVec2 gs = g_bold->CalcTextSizeA(18 * k, FLT_MAX, 0, glyph);
+        dl->AddText(g_bold, 18 * k, ImVec2(c.x - gs.x / 2, c.y - gs.y / 2), ink, glyph);
+    }
     dl->AddText(g_regular, 21 * k, ImVec2(at.x + 2 * r + 9 * k, at.y + r - 12 * k), Col(230, 234, 242, alpha), label);
     return 2 * r + 9 * k + g_regular->CalcTextSizeA(21 * k, FLT_MAX, 0, label).x + 30 * k;
 }
@@ -177,7 +187,7 @@ void DrawFooter(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float alp
         if (n > 0) prompts.push_back({"A", accept});
     } else {
         if (s.dialog.mode != IssDialogProgress) prompts.push_back({"Esc", "Back"});
-        if (n > 0) prompts.push_back({"\xE2\x86\xB5", accept}); // return arrow
+        if (n > 0) prompts.push_back({"Enter", accept}); // Segoe UI has no return arrow
     }
     for (auto& p : prompts) {
         const float w = 26 * k + 9 * k + g_regular->CalcTextSizeA(21 * k, FLT_MAX, 0, p.l).x + 30 * k;
@@ -333,9 +343,9 @@ void DrawMessage(ImDrawList* dl, State& s, ImVec2 a, ImVec2 b, float k, float al
     s.hover = hovered_button;
 }
 
-// Controllers, read every frame: the game's pad code (src/pad.c) turns SDL's gamepad events off,
-// so the dialog reads XInput (Xbox pads, Steam Input, the Steam Deck) and the state of the
-// gamepads SDL has open (PlayStation pads without Steam) directly.
+// Controllers, read every frame: XInput (Xbox pads, Steam Input, the Steam Deck) and the game's own
+// controller from src/pad.c (iss_pad_dialog_state, exported by the exe: this DLL's static SDL never
+// opens it, so a DualSense / DualShock 4 without Steam was invisible here until 2026-11-08).
 enum PadBit : unsigned { PadUp = 1, PadDown = 2, PadLeft = 4, PadRight = 8, PadA = 16, PadB = 32, PadLb = 64, PadRb = 128 };
 unsigned ReadPads() {
     unsigned bits = 0;
@@ -360,22 +370,23 @@ unsigned ReadPads() {
         if (g.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) bits |= PadLb;
         if (g.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) bits |= PadRb;
     }
-    int n = 0;
-    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
-        for (int i = 0; i < n; ++i) {
-            SDL_Gamepad* g = SDL_GetGamepadFromID(ids[i]); // only the ones the game opened
-            if (!g) continue;
-            const Sint16 ly = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY), lx = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX);
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_UP) || ly < -dead) bits |= PadUp;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_DOWN) || ly > dead) bits |= PadDown;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_LEFT) || lx < -dead) bits |= PadLeft;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || lx > dead) bits |= PadRight;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_SOUTH)) bits |= PadA;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_EAST)) bits |= PadB;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) bits |= PadLb;
-            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) bits |= PadRb;
-        }
-        SDL_free(ids);
+    using PadState = uint64_t (*)(int16_t*, int*);
+    static PadState game_pad = reinterpret_cast<PadState>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(nullptr), "iss_pad_dialog_state")));
+    if (game_pad) {
+        int16_t axes[2] = {};
+        int playstation = 0;
+        const uint64_t b = game_pad(axes, &playstation);
+        g_playstation = playstation != 0;
+        auto on = [&](int button) { return ((b >> button) & 1) != 0; };
+        if (on(SDL_GAMEPAD_BUTTON_DPAD_UP) || axes[1] < -dead) bits |= PadUp;
+        if (on(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || axes[1] > dead) bits |= PadDown;
+        if (on(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || axes[0] < -dead) bits |= PadLeft;
+        if (on(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || axes[0] > dead) bits |= PadRight;
+        if (on(SDL_GAMEPAD_BUTTON_SOUTH)) bits |= PadA;
+        if (on(SDL_GAMEPAD_BUTTON_EAST)) bits |= PadB;
+        if (on(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) bits |= PadLb;
+        if (on(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) bits |= PadRb;
     }
     return bits;
 }
