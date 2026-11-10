@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,46 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "iss_dlss.h"
+
+namespace iss::dlss { extern std::atomic<bool> g_present_stall; } // iss_dlss_sl.cpp
+
+namespace {
+// ISS_DLSS=1: a driver frame limiter that paces inside vkQueuePresentKHR (NVIDIA Control Panel
+// "Max Frame Rate" with Streamline loaded) costs a whole refresh per frame on top of VSync
+// (4 Nov 2026: 60 -> 30 FPS). Seen as presents that block >= 10 ms on average while frames take
+// >= 25 ms (below 40 FPS), over 120 presents: the F9 box says what to change, the log says once.
+void NotePresentTime(u64 begin_ns, u64 end_ns) {
+    static u64 count = 0, block_ns = 0, first_ns = 0;
+    static bool logged = false;
+    if (!count) first_ns = begin_ns;
+    block_ns += end_ns - begin_ns;
+    if (++count < 120) return;
+    const double block_ms = double(block_ns) / 1e6 / double(count);
+    const double frame_ms = double(end_ns - first_ns) / 1e6 / double(count - 1);
+    const bool stall = block_ms >= 10.0 && frame_ms >= 25.0;
+    if (stall != iss::dlss::g_present_stall.load(std::memory_order_relaxed)) {
+        iss::dlss::g_present_stall.store(stall, std::memory_order_relaxed);
+        std::fprintf(stderr, "DLSS present stall %s: present %.1f ms, frame %.1f ms\n",
+                     stall ? "on" : "off", block_ms, frame_ms);
+        if (stall && !logged) {
+            logged = true;
+            LOG_WARNING(Render_Vulkan,
+                        "DLSS: presents block {:.1f} ms each ({:.1f} FPS): a driver frame limiter "
+                        "is pacing frames. NVIDIA Control Panel -> Manage 3D settings -> Program "
+                        "Settings -> iss-probe.exe -> Max Frame Rate: Off (the launcher's frame "
+                        "rate limit does the same without the stall)",
+                        block_ms, 1000.0 / frame_ms);
+        }
+    }
+    count = block_ns = 0;
+}
+u64 PresentNowNs() {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+}
+} // namespace
 
 namespace Vulkan {
 
@@ -210,7 +251,17 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
-    auto result = instance.GetPresentQueue().presentKHR(present_info);
+    // ISS_DLSS=1: through Streamline's present proxy (its per-frame bookkeeping), else as usual.
+    vk::Result result;
+    if (const auto dlss_present = iss::dlss::PresentFunction()) [[unlikely]] {
+        const VkPresentInfoKHR raw = present_info;
+        const u64 begin = PresentNowNs();
+        result = static_cast<vk::Result>(
+            dlss_present(static_cast<VkQueue>(instance.GetPresentQueue()), &raw));
+        NotePresentTime(begin, PresentNowNs());
+    } else {
+        result = instance.GetPresentQueue().presentKHR(present_info);
+    }
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {

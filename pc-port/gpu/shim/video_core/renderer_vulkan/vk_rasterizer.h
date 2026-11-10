@@ -670,6 +670,9 @@ private:
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 
     bool FilterDraw();
+    /// ISS_DLSS=1 (iss_dlss.h): the game's T2x resolve as DLAA. False = not done (the game's
+    /// own resolve draw runs).
+    bool DlssResolve();
 
     void TraceShaderResources(const Shader::Info& stage);
     void TraceBufferWriters(const Shader::Info& stage);

@@ -74,15 +74,6 @@ const wchar_t* kTabNames[TabCount] = {L"DISPLAY", L"GRAPHICS", L"GAME", L"ADVANC
 std::vector<Setting> g_settings = {
     {"window_mode", L"Window mode", L"Alt+Enter also switches in game.",
      {{L"Windowed", "0"}, {L"Fullscreen", "1"}}, TabDisplay},
-    {"vsync", L"VSync", L"Off: no tearing protection, lowest latency.",
-     {{L"On", "Fifo"}, {L"Off", "Immediate"}}, TabDisplay},
-    {"fps_limit", L"Frame rate limit", L"Above your monitor's refresh rate it needs VSync Off.",
-     {{L"Unlimited", "0"}, {L"30", "30"}, {L"40", "40"}, {L"50", "50"}, {L"60", "60"},
-      {L"75", "75"}, {L"90", "90"}, {L"100", "100"}, {L"120", "120"}, {L"144", "144"},
-      {L"165", "165"}, {L"240", "240"}},
-     TabDisplay},
-    {"fsr", L"Upscaling (FSR 1)", L"Upscales the picture on windows larger than it.",
-     {{L"Off", "0"}, {L"On", "1"}}, TabDisplay},
     // The picture size, field of view and HUD edges (native/ultrawide.cpp: ISS_RESOLUTION,
     // ISS_FOV, ISS_HUD_ASPECT). Wider than 16:9 keeps the vertical view and widens it.
     {"resolution", L"Resolution", L"Wider than 16:9 shows more to the sides. Desktop: your monitor's.",
@@ -90,15 +81,32 @@ std::vector<Setting> g_settings = {
       {L"3840x2160 (16:9)", "3840x2160"}, {L"2560x1080 (21:9)", "2560x1080"},
       {L"3440x1440 (21:9)", "3440x1440"}, {L"3840x1600 (24:10)", "3840x1600"},
       {L"3840x1080 (32:9)", "3840x1080"}, {L"5120x1440 (32:9)", "5120x1440"}, {L"Desktop", "desktop"}},
-     TabGraphics},
+     TabDisplay},
+    {"vsync", L"VSync", L"Off: no tearing protection, lowest latency.",
+     {{L"On", "Fifo"}, {L"Off", "Immediate"}}, TabDisplay},
+    {"fps_limit", L"Frame rate limit", L"Above your monitor's refresh rate it needs VSync Off.",
+     {{L"Unlimited", "0"}, {L"30", "30"}, {L"40", "40"}, {L"50", "50"}, {L"60", "60"},
+      {L"75", "75"}, {L"90", "90"}, {L"100", "100"}, {L"120", "120"}, {L"144", "144"},
+      {L"165", "165"}, {L"240", "240"}},
+     TabDisplay},
+    {"hud_width", L"HUD width", L"Where the HUD edges sit on screens wider than it.",
+     {{L"16:9", "1.7778"}, {L"21:9", "2.3704"}, {L"Full width", "0"}}, TabDisplay},
+    // Upscaling (EnvironmentFor): Off = the game's own SMAA at the resolution (4K renders
+    // 3200x1800, the light-list limit, scaled to the window). FSR 1 (BB_FSR1) / DLSS (ISS_DLSS=1 +
+    // ISS_DLSS_UPSCALE=1, gpu/iss_dlss_upscale.h): the game renders at the resolution times the
+    // quality's scale (RenderResolutionValue) and the upscaler draws the full resolution. DLSS
+    // Native = DLAA (ISS_DLSS=1 alone, gpu/iss_dlss_sl.cpp). In game: Home (Fn+End) = DLSS on / off.
+    {"upscaling", L"Upscaling", L"DLSS: NVIDIA RTX, needs the DLSS files in the dlss folder. FSR 1: any GPU.",
+     {{L"Off", "off"}, {L"FSR 1", "fsr"}, {L"DLSS", "dlss"}}, TabGraphics},
+    // Shown only with Upscaling on (SettingShown).
+    {"upscale_quality", L"Upscaling quality", L"Native: full size (with DLSS = DLAA). Quality 67%, Balanced 58%, Perf. 50%.",
+     {{L"Native", "1"}, {L"Quality", "0.667"}, {L"Balanced", "0.58"}, {L"Performance", "0.5"}}, TabGraphics},
+    {"shader_mode", L"Shader compilation", L"Wait: no missing objects. Skip: smoother, brief pop-in.",
+     {{L"Wait", "0"}, {L"Skip", "1"}}, TabGraphics},
     {"fov", L"Field of view", L"100%: the game's own. Higher shows more around the camera.",
      {{L"100%", "100"}, {L"105%", "105"}, {L"110%", "110"}, {L"115%", "115"}, {L"120%", "120"},
       {L"130%", "130"}, {L"90%", "90"}},
      TabGraphics},
-    {"hud_width", L"HUD width", L"Where the HUD edges sit on screens wider than it.",
-     {{L"16:9", "1.7778"}, {L"21:9", "2.3704"}, {L"Full width", "0"}}, TabGraphics},
-    {"shader_mode", L"Shader compilation", L"Wait: no missing objects. Skip: smoother, brief pop-in.",
-     {{L"Wait", "0"}, {L"Skip", "1"}}, TabGraphics},
     {"blackbox", L"GPU crash diagnostics", L"Writes a report if the GPU hangs.",
      {{L"On", "1"}, {L"Off", "0"}}, TabAdvanced},
     // ISS_GPU_PROFILE=1: GPU timestamps around the command processor's submissions
@@ -255,6 +263,8 @@ std::string Narrow(const std::wstring& w) {
 
 fs::path ConfigPath() { return g_user / "launcher.ini"; }
 
+const char* SettingValue(const char* key);
+
 void LoadConfig() {
     std::ifstream f(ConfigPath());
     std::string line, language;
@@ -279,6 +289,37 @@ void LoadConfig() {
                 if (value == s.choices[i].value) s.index = int(i);
         }
         if (!known) g_extra[key] = value;
+    }
+    // Launchers before 4 Nov 2026: fsr=0/1 and dlss=0/1(DLAA)/2(upscale) + dlss_quality.
+    const auto set = [](const char* key, const std::string& value) {
+        for (auto& s : g_settings)
+            if (!strcmp(s.key, key))
+                for (size_t i = 0; i < s.choices.size(); ++i)
+                    if (value == s.choices[i].value) s.index = int(i);
+    };
+    if (const auto fsr = g_extra.find("fsr"); fsr != g_extra.end()) {
+        if (fsr->second == "1") set("upscaling", "fsr");
+        g_extra.erase(fsr);
+    }
+    if (const auto dlss = g_extra.find("dlss"); dlss != g_extra.end()) {
+        if (dlss->second == "1") {
+            set("upscaling", "dlss");
+            set("upscale_quality", "1");
+        }
+        if (dlss->second == "2") set("upscaling", "dlss");
+        g_extra.erase(dlss);
+    }
+    if (const auto q = g_extra.find("dlss_quality"); q != g_extra.end()) {
+        set("upscale_quality", q->second);
+        g_extra.erase(q);
+    }
+    // 4 Nov 2026 test build: anti_aliasing=dlaa = DLSS at Native.
+    if (const auto aa = g_extra.find("anti_aliasing"); aa != g_extra.end()) {
+        if (aa->second == "dlaa" && !strcmp(SettingValue("upscaling"), "off")) {
+            set("upscaling", "dlss");
+            set("upscale_quality", "1");
+        }
+        g_extra.erase(aa);
     }
     ApplyEdition(language);
     ReadPadMap();
@@ -307,6 +348,20 @@ std::string ResolutionValue() {
     if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) || !mode.dmPelsWidth || !mode.dmPelsHeight)
         return "1920x1080";
     return std::to_string(mode.dmPelsWidth) + "x" + std::to_string(mode.dmPelsHeight);
+}
+
+// Upscaling on: the render size = the resolution times the quality's scale (Quality 0.667,
+// Balanced 0.58, Performance 0.5), multiples of 8 (native/ultrawide.cpp); 4K Quality = 2560x1440.
+std::string RenderResolutionValue() {
+    const std::string full = ResolutionValue();
+    if (!strcmp(SettingValue("upscaling"), "off")) return full;
+    const auto x = full.find('x');
+    const double scale = std::atof(SettingValue("upscale_quality"));
+    if (x == std::string::npos || !(scale >= 0.3 && scale < 1.0)) return full;
+    const long w = std::lround(std::atol(full.c_str()) * scale) & ~7L;
+    const long h = std::lround(std::atol(full.c_str() + x + 1) * scale) & ~7L;
+    if (w < 640 || h < 360) return full;
+    return std::to_string(w) + "x" + std::to_string(h);
 }
 
 // ISS_UNIFIED_MEMORY: "0" with an NVIDIA display adapter in the system when set to Auto, else "1".
@@ -882,8 +937,12 @@ std::wstring LaunchGame(HWND notify) {
     // next tick (75 ran at 80 FPS, 144 at 120), so the vblank runs at a multiple of the limit.
     if (const int limit = atoi(SettingValue("fps_limit")); limit > 0)
         env[L"BB_VBLANK_HZ"] = std::to_wstring(limit * ((240 + limit - 1) / limit));
-    env[L"BB_FSR1"] = Widen(SettingValue("fsr"));
-    env[L"ISS_RESOLUTION"] = Widen(ResolutionValue());
+    const std::string upscaling = SettingValue("upscaling");
+    const bool native = std::atof(SettingValue("upscale_quality")) >= 1.0;
+    env[L"BB_FSR1"] = upscaling == "fsr" ? L"1" : L"0";
+    env[L"ISS_DLSS"] = upscaling == "dlss" ? L"1" : L"0";
+    env[L"ISS_DLSS_UPSCALE"] = upscaling == "dlss" && !native ? L"1" : L"0";
+    env[L"ISS_RESOLUTION"] = Widen(RenderResolutionValue());
     env[L"ISS_FOV"] = Widen(SettingValue("fov"));
     env[L"ISS_HUD_ASPECT"] = Widen(SettingValue("hud_width"));
     env[L"ISS_ASYNC_SKIP_DRAWS"] = Widen(SettingValue("shader_mode"));
@@ -1267,6 +1326,11 @@ float SpacedWidth(Graphics& g, const wchar_t* text, const Font& font, float spac
     return w - spacing;
 }
 
+// Upscaling quality only means something with an upscaler on.
+bool SettingShown(const Setting& s) {
+    return strcmp(s.key, "upscale_quality") != 0 || strcmp(SettingValue("upscaling"), "off") != 0;
+}
+
 // The items the focus walks through, top to bottom, on the current screen.
 std::vector<int> FocusOrder() {
     std::vector<int> order;
@@ -1284,7 +1348,7 @@ std::vector<int> FocusOrder() {
         break;
     case Screen::Settings:
         for (size_t i = 0; i < g_settings.size(); ++i)
-            if (g_settings[i].tab == g_tab) order.push_back(HotSetting0 + int(i));
+            if (g_settings[i].tab == g_tab && SettingShown(g_settings[i])) order.push_back(HotSetting0 + int(i));
         if (g_tab == TabAdvanced)
             for (int a = 0; a < ActCount; ++a) order.push_back(HotAction0 + a);
         order.push_back(HotBack);
@@ -1607,7 +1671,7 @@ void Paint(HDC hdc, int width, int height) {
         const float row_w = S(450);
         for (size_t i = 0; i < g_settings.size(); ++i) {
             auto& s = g_settings[i];
-            if (s.tab != g_tab) continue;
+            if (s.tab != g_tab || !SettingShown(s)) continue;
             const int id = HotSetting0 + int(i);
             const RectF row(left - S(10), ry - S(4), row_w, S(50));
             const float t = lit(id);

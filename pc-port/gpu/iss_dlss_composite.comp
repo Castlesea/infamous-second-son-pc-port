@@ -1,0 +1,29 @@
+#version 450
+// ISS_DLSS=2 (gpu/iss_dlss_upscale.cpp; port of AxylPup dlss_composite.comp, GPL-2.0-or-later):
+// the frame at the output size = the game's HUD layer over the DLSS output. The layer is cleared to
+// (0, 0, 0, 1); its draws blend their colour as the game does and alpha as transmittance (what is
+// left of the scene below: over multiplies it by 1 - As, a darkening panel by its factor), so
+// frame = hud.rgb + hud.a * scene, in the sRGB-encoded space the game
+// blends in, then decoded (the post pass expects what sampling the sRGB display buffer gives).
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(constant_id = 0) const bool swap_rb = true; // the game's final copy swaps R / B
+layout(set = 0, binding = 0) uniform texture2D hud_layer;
+layout(set = 0, binding = 1) uniform texture2D scene;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D frame_out;
+layout(set = 0, binding = 3) uniform sampler linear_sampler;
+vec3 SrgbToLinear(vec3 c) {
+    const vec3 lo = c / 12.92;
+    const vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(lo, hi, greaterThan(c, vec3(0.04045)));
+}
+void main() {
+    const ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(frame_out);
+    if (pos.x >= size.x || pos.y >= size.y) return;
+    const vec2 uv = (vec2(pos) + 0.5) / vec2(size);
+    const vec4 hud = texture(sampler2D(hud_layer, linear_sampler), uv);
+    const vec3 base = texelFetch(sampler2D(scene, linear_sampler), pos, 0).rgb;
+    vec3 encoded = clamp(hud.rgb + hud.a * base, 0.0, 1.0);
+    if (swap_rb) encoded = encoded.bgr;
+    imageStore(frame_out, pos, vec4(SrgbToLinear(encoded), 1.0));
+}
