@@ -47,6 +47,7 @@ static SDL_AudioDeviceID spk_target(int *out){
         found=ids[i];}
     SDL_free(ids);return found?found:SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
 }
+void pad_speaker_route(int on); // src/pad.c: the DualSense's speaker output report
 // Opens p->stream on dev (the lock held). 0 on failure.
 static int open_stream(Port *p,SDL_AudioDeviceID dev,int out){
     if(p->stream){SDL_DestroyAudioStream(p->stream);p->stream=NULL;}
@@ -56,6 +57,7 @@ static int open_stream(Port *p,SDL_AudioDeviceID dev,int out){
         p->dev=SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;p->out=0;spec.channels=p->channels;p->stream=SDL_OpenAudioDeviceStream(p->dev,&spec,NULL,NULL);}
     if(!p->stream)return 0;
     SDL_ResumeAudioStreamDevice(p->stream);
+    if(p->type==4)pad_speaker_route(p->out>0);
     if(p->type==4){const char *name=p->dev==SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK?"default output":SDL_GetAudioDeviceName(p->dev);
         printf("Audio pad speaker -> %s (%d ch)\n",name?name:"?",p->out?p->out:p->channels);}
     return 1;
