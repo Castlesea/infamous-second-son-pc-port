@@ -185,7 +185,29 @@ static void fill_snapshot(PadSnapshot *s){
             if(!SDL_GetGamepadTouchpadFinger(sdl_pad,0,i,&s->finger[i].down,&s->finger[i].x,&s->finger[i].y,&pressure))s->finger[i].down=false;}}
     SDL_GetGamepadSensorData(sdl_pad,SDL_SENSOR_GYRO,s->gyro,3);SDL_GetGamepadSensorData(sdl_pad,SDL_SENSOR_ACCEL,s->accel,3);
 }
+// The DualSense speaker (src/audio.c routes the PS4 pad speaker to the controller's sound device): the
+// controller plays that stream on its speaker only once an output report sets speaker volume, output
+// path 3 (right channel to the speaker) and the speaker preamp (Linux hid-playstation's fields, as DSZ
+// and Sony's PC ports send them). Kept by the controller until it powers off; sent once per connection.
+static volatile LONG speaker_wanted;static uint32_t speaker_applied=UINT32_MAX;
+void pad_speaker_route(int on){InterlockedExchange(&speaker_wanted,on?1:0);if(!on)speaker_applied=UINT32_MAX;}
+static void apply_speaker(void){
+    if(!speaker_wanted||!sdl_pad||speaker_applied==pad_generation)return;
+    speaker_applied=pad_generation;
+    if(SDL_GetGamepadType(sdl_pad)!=SDL_GAMEPAD_TYPE_PS5)return;
+    static int gain=-1;
+    if(gain<0){const char *v=getenv("ISS_PAD_SPEAKER_GAIN");gain=v&&*v?atoi(v):2;if(gain<0)gain=0;if(gain>7)gain=7;}
+    uint8_t e[47]={0};
+    e[0]=0x20|0x80;     // valid: speaker volume, audio control
+    e[1]=0x80;          // valid: audio control 2 (speaker preamp)
+    e[5]=0x64;          // speaker volume (Linux's accepted range 0x3D..0x64)
+    e[7]=3<<4;          // output path 3: the right channel to the speaker, the headset muted
+    e[37]=(uint8_t)gain;
+    const bool ok=SDL_SendGamepadEffect(sdl_pad,e,sizeof(e));
+    fprintf(stderr,"PAD speaker on: volume 0x64, path 3, preamp %d: %s\n",gain,ok?"sent":SDL_GetError());
+}
 static void apply_requests(void){
+    apply_speaker();
     const LONG r=rumble_seq,l=led_seq;
     if(r!=rumble_applied){rumble_applied=r;AcquireSRWLockShared(&request_lock);const Uint16 lo=rumble_lo,hi=rumble_hi;const Uint32 ms=rumble_ms;ReleaseSRWLockShared(&request_lock);
         if(sdl_pad)SDL_RumbleGamepad(sdl_pad,lo,hi,ms);}
