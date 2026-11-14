@@ -134,10 +134,13 @@ std::vector<Setting> g_settings = {
     // Its hint and choices are those of the game folder's edition (kEditions, ApplyEdition).
     {"language", L"Language", L"", {}, TabGame},
     // src/pad.c, controllers without a gyro or a touchpad (ISS_PAD_STICK_SPRAY, ISS_PAD_STICK_SWIPE).
-    {"stick_spray", L"Spray can on the right stick", L"No gyro: L3+R3 holds it (the mouse too), stick aims, A shakes, RB recenters.",
+    {"stick_spray", L"Spray can on L3 + R3", L"L3+R3: turn on its side and shake (gyro: shake). No gyro: stick aims; B or L3+R3 held ends it.",
      {{L"On", "1"}, {L"Off", "0"}}, TabGame},
     {"stick_swipe", L"Touchpad swipes on the right stick", L"Hold a touchpad button (View) and push the stick to swipe.",
      {{L"On", "1"}, {L"Off", "0"}}, TabGame},
+    // src/pad.c, the Mobile Command Center's core (ISS_PAD_CORE_HOLD, ISS_PAD_CORE_TURBO).
+    {"core_hold", L"Hold a swipe up (Command Center cores)", L"View + stick up, held: the finger stays up for you; press or hold R2. A, B, View or walking lets go.",
+     {{L"On, R2 held repeats", "1"}, {L"On, R2 as pressed", "notturbo"}, {L"Off", "0"}}, TabGame},
 };
 
 // The games the port runs. Each has its own files under user\ (its game folder, settings,
@@ -208,12 +211,13 @@ const PadName kPadTargets[] = {
     {"triangle", L"Triangle"}, {"l1", L"L1"}, {"r1", L"R1"}, {"l2", L"L2"}, {"r2", L"R2"},
     {"l3", L"L3"}, {"r3", L"R3"}, {"options", L"Options"}, {"ps", L"PS button"},
     {"up", L"D-pad up"}, {"down", L"D-pad down"}, {"left", L"D-pad left"}, {"right", L"D-pad right"},
-    {"touch", L"Touchpad press"}, {"touch_left", L"Touchpad left"}, {"touch_right", L"Touchpad right"},
+    {"touch", L"Touchpad press"}, {"touch_left", L"Touchpad left"}, {"touch_right", L"Touchpad right"}, {"touch_both", L"Touchpad both sides"},
     {"swipe_up", L"Swipe up"}, {"swipe_down", L"Swipe down"}, {"swipe_left", L"Swipe left"},
     {"swipe_right", L"Swipe right"}};
 constexpr int kPadSourceCount = int(std::size(kPadSources)), kPadTargetCount = int(std::size(kPadTargets));
-// Recommended: the PS4 layout one to one; View / Menu press the left / right side of the touchpad.
-const int kRecommendedPadMap[kPadSourceCount] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 19, 12, 0, 13, 14, 15, 16};
+// Recommended: the PS4 layout one to one; Menu is Options (pause), View presses the touchpad on
+// both sides (View + D-pad left / right: that side only; src/pad.c touch_both).
+const int kRecommendedPadMap[kPadSourceCount] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 11, 12, 0, 13, 14, 15, 16};
 int g_pad_map[kPadSourceCount];
 
 bool PadMapRecommended() { return std::equal(std::begin(g_pad_map), std::end(g_pad_map), std::begin(kRecommendedPadMap)); }
@@ -957,6 +961,9 @@ std::wstring LaunchGame(HWND notify) {
     env[L"ISS_LANGUAGE"] = Widen(SettingValue("language"));
     env[L"ISS_PAD_STICK_SPRAY"] = Widen(SettingValue("stick_spray"));
     env[L"ISS_PAD_STICK_SWIPE"] = Widen(SettingValue("stick_swipe"));
+    {const std::string core = SettingValue("core_hold");
+     env[L"ISS_PAD_CORE_HOLD"] = core == "0" ? L"0" : L"1";
+     env[L"ISS_PAD_CORE_TURBO"] = core == "notturbo" ? L"0" : L"1";}
     // Started from Steam, its Fossilize layer records every pipeline the game creates (thousands:
     // 300 MB in 30 s, ~100 ms per frame of pipeline creation and second-long stalls). The port
     // keeps its own pipeline cache, so the layer is turned off for the game.
@@ -1745,10 +1752,9 @@ void Paint(HDC hdc, int width, int height) {
             g_spots.push_back({RectF(cx - S(10), ry - S(3), col_w, row_h - S(1)), id});
         }
         const float ey = rows_y + 9 * row_h + S(8);
-        g.DrawString(L"Recommended: the PS4 layout one to one; View and Menu press the left and right side of the "
-                     L"touchpad. The game asks for the touchpad in fast gameplay moments (absorbing powers, finishers, "
-                     L"prompts), so it stays under your thumbs instead of on the keyboard. Options (pause): Esc, or give "
-                     L"it a button here.\n"
+        g.DrawString(L"Recommended: the PS4 layout one to one; Menu pauses (Options) and View presses the touchpad "
+                     L"with a finger on each side, which meets the game's left, right, middle and both-sides prompts "
+                     L"(absorbing powers, finishers, lifting cars). View + D-pad left / right presses that side only.\n"
                      L"In game, F5 opens the touchpad & spray window (the ? at the top right tells the keys).",
                      -1, &hint, RectF(left, ey, S(800), S(76)), nullptr, &dim_brush);
         const float by = ey + S(74);
@@ -1921,8 +1927,10 @@ void Paint(HDC hdc, int width, int height) {
                 L"shake it, hold the left button to spray. Shift: fine aim. Middle button: recenter. F7 again "
                 L"ends it.\n\n"
                 L"Keyboard: Space / Backspace press the left / right side of the touchpad, F8 both, 1-4 swipe.\n\n"
-                L"Controller without a gyro: L3+R3 holds it as the spray can with F7 (right stick aims, A shakes, RB "
-                L"recenters, R2 sprays). Hold View and push the right stick to swipe the touchpad.",
+                L"Spray can: L3+R3 turns the controller on its side and shakes it; again to shake again. Without a "
+                L"gyro the right stick then aims and R2 sprays; B, L3+R3 held, walking or 8 s without spraying ends it. Hold View and push "
+                L"the right stick to swipe the touchpad; keep it pushed up to hold the swipe (Command Center cores): "
+                L"then press or hold R2. View + D-pad left / right touches that side only.",
                 -1, &hint, RectF(box.X + S(16), box.Y + S(36), box.Width - S(32), box.Height - S(44)), nullptr,
                 &text_brush);
         }

@@ -67,16 +67,18 @@ enum {SRC_A,SRC_B,SRC_X,SRC_Y,SRC_LB,SRC_RB,SRC_LT,SRC_RT,SRC_LS,SRC_RS,SRC_VIEW
 static const char *const source_names[SRC_COUNT]={"a","b","x","y","lb","rb","lt","rt","ls","rs","view","menu","guide","share",
     "up","down","left","right"};
 enum {T_NONE,T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_OPTIONS,T_PS,T_UP,T_DOWN,T_LEFT,T_RIGHT,
-      T_TOUCH,T_TOUCH_LEFT,T_TOUCH_RIGHT,T_SWIPE_UP,T_SWIPE_DOWN,T_SWIPE_LEFT,T_SWIPE_RIGHT,T_COUNT};
+      T_TOUCH,T_TOUCH_LEFT,T_TOUCH_RIGHT,T_TOUCH_BOTH,T_SWIPE_UP,T_SWIPE_DOWN,T_SWIPE_LEFT,T_SWIPE_RIGHT,T_COUNT};
 // L2/R2 carry the trigger's analog value; their button bits follow it (pad_read, above 30).
 static const struct {const char *name;uint32_t bit;} targets[T_COUNT]={{"none",0},{"cross",0x4000},{"circle",0x2000},
     {"square",0x8000},{"triangle",0x1000},{"l1",0x400},{"r1",0x800},{"l2",0},{"r2",0},{"l3",2},{"r3",4},{"options",8},
     {"ps",0x10000},{"up",0x10},{"down",0x40},{"left",0x80},{"right",0x20},{"touch",0x100000},{"touch_left",0x100000},
-    {"touch_right",0x100000},{"swipe_up",0},{"swipe_down",0},{"swipe_left",0},{"swipe_right",0}};
-// Recommended (the user's layout, 2026-10-19): the PS4 layout one to one, and View / Menu press
-// the left / right side of the touchpad, under the thumbs for the game's quick touchpad prompts.
-static uint8_t pad_map[SRC_COUNT]={T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_TOUCH_LEFT,
-    T_TOUCH_RIGHT,T_PS,T_NONE,T_UP,T_DOWN,T_LEFT,T_RIGHT};
+    {"touch_right",0x100000},{"touch_both",0x100000},{"swipe_up",0},{"swipe_down",0},{"swipe_left",0},{"swipe_right",0}};
+// Recommended (2026-11-02): the PS4 layout one to one, Menu is Options (the pause menu) and View
+// presses the touchpad with a finger on each side (touch_both: a prompt for the left side, the
+// right side, the middle or both, such as lifting a car, is met by one press). View + D-pad left /
+// right presses that side only (the D-pad press is not passed on).
+static uint8_t pad_map[SRC_COUNT]={T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_TOUCH_BOTH,
+    T_OPTIONS,T_PS,T_NONE,T_UP,T_DOWN,T_LEFT,T_RIGHT};
 static const uint8_t playstation_map[SRC_COUNT]={T_CROSS,T_CIRCLE,T_SQUARE,T_TRIANGLE,T_L1,T_R1,T_L2,T_R2,T_L3,T_R3,T_NONE,
     T_OPTIONS,T_PS,T_NONE,T_UP,T_DOWN,T_LEFT,T_RIGHT};
 // The keyboard's touchpad shortcuts (launcher TOUCHPAD SHORTCUTS, ISS_TOUCH_KEYS="touch_left=32,..."
@@ -86,18 +88,53 @@ static const char *const touch_key_names[K_COUNT]={"touch_left","touch_right","t
     "swipe_down","swipe_left","swipe_right","mouse_touchpad","spray","panel"};
 static int touch_keys[K_COUNT]={VK_SPACE,VK_BACK,VK_F8,'T','1','2','3','4',VK_F6,VK_F7,VK_F5};
 static int pad_swipe=-1,source_was[SRC_COUNT];
-// Controllers without a gyro (ISS_PAD_STICK_SPRAY, default on): L3 and R3 pressed together start
-// the spray can of the graffiti missions and end it again (those presses are not passed on), with
-// the mouse's spray mode (F7). The controller is then held on its side like a can, the right stick
-// turns it as the mouse does (pad_read), A (cross) shakes it and RB recentres it; R2 sprays as
-// usual. Controllers with a gyro are the can themselves.
-static int stick_spray,stick_chord,stick_shake,stick_recentre,stick_rb_was;
+// The spray can of the graffiti missions (ISS_PAD_STICK_SPRAY, default on). L3 and R3 pressed
+// together (not passed on; the game gives the pair no action) are the can gesture:
+// - a controller without a gyro: the first press turns the controller on its side (0.35 s, as a
+//   hand would) and then shakes it (1.2 s), and from then on the right stick turns the can as the
+//   mouse does (pad_read) and R2 sprays, with the mouse's spray mode (F7). Every press again shakes
+//   it again. It ends by itself once the graffiti is over: when Delsin is walked (left stick past
+//   half for 0.5 s; he cannot walk while spraying) or after 8 s without R2 once it sprayed (30 s if
+//   it never did); B (Circle, still passed on) or L3 + R3 held for 0.8 s end it at once. Moving the
+//   right stick does not keep it (the camera stuck after a graffiti, 2026-11-02). A, RB and the
+//   other buttons stay the game's.
+// - a controller with a gyro is the can itself (it is turned by hand): the press shakes it (1.2 s).
+// A short rumble marks each shake; a longer one the can's start, a short one its end.
+#define CAN_TURN_S .35
+#define CAN_SHAKE_S 1.2
+#define CAN_EXIT_HOLD_S .8
+#define CAN_DONE_S 8.0
+#define CAN_UNUSED_S 30.0
+#define CAN_WALK_S .5
+static int stick_spray,stick_chord,stick_shake,stick_recentre,chord_in_can,chord_exit,stick_b_was,can_gyro_shake,can_pulse;
+static double can_turn_from=-1,can_shake_until=-1,chord_started,can_used,can_walk_from=-1;
+static int can_sprayed;
 static float stick_aim[2];
 // Swipes without a touchpad (ISS_PAD_STICK_SWIPE, default on): while a button that touches the
 // touchpad (View by default) is held, the right stick swipes it, once each time it is pushed past
 // 60% and back under 30%, and does not turn the camera. That button's touch is let go from the
 // swipe until it is released, so the swipe does not end in a tap.
 static int swipe_armed=1,swipe_latched;
+// The Mobile Command Center's core (ISS_PAD_CORE_HOLD, default on): the game wants a swipe up held
+// at the top of the touchpad (it lifts the core; a lifted finger lets it drop) while R2 is pressed
+// again and again. A swipe up on the right stick (View held) that keeps the stick up for
+// CORE_LATCH_S, before the stroke ends, latches it: the finger stays at the top, the same contact,
+// with View and the stick let go, so the hand is free for R2. A quick flick stays a plain swipe.
+// While it is held, R2 held is pressed again and again for you (ISS_PAD_CORE_TURBO, default on:
+// CORE_TURBO_HZ, half of each period down); taps pass as they are. It lets go on B (Circle) or A
+// (Cross), both passed on, a new press of View (its touch not passed on), Delsin walked (left stick
+// past half for CORE_WALK_S), or CORE_DONE_S without R2 once it was pressed (CORE_UNUSED_S if never).
+#define CORE_LATCH_S .40
+#define CORE_TURBO_HZ 8.0
+#define CORE_WALK_S .5
+#define CORE_DONE_S 6.0
+#define CORE_UNUSED_S 15.0
+#define CORE_Y .15f // the end of the swipe up (pad_read's stroke), where the finger rests
+static int core_hold,core_option=-1,core_turbo=-1,core_touch_was,core_ab_was,core_pulse,core_r2_was,core_shown;
+static double core_flick_from=-1,core_used,core_walk_from=-1,core_r2_from;
+static int core_pressed;
+static void core_release(const char *why){if(!core_hold)return;core_hold=0;core_flick_from=core_walk_from=-1;core_pulse=-1;
+    fprintf(stderr,"PAD_CORE hold off (%s)\n",why);}
 static int option_on(const char *name){const char *s=getenv(name);return !s||s[0]!='0';}
 static void load_controls(void){
     const char *s=getenv("ISS_PAD_MAP");
@@ -116,31 +153,67 @@ static void apply_map(const uint8_t map[SRC_COUNT],const int pressed[SRC_COUNT],
     if(spray_option<0){spray_option=option_on("ISS_PAD_STICK_SPRAY");swipe_option=option_on("ISS_PAD_STICK_SWIPE");}
     int held[SRC_COUNT];memcpy(held,pressed,sizeof(held));
     const float sx=((float)out->rx-128)/127.f,sy=((float)out->ry-128)/127.f;
-    if(spray_option&&!gyro){
-        if(held[SRC_LS]&&held[SRC_RS]&&!stick_chord){stick_chord=1;stick_spray=!stick_spray;stick_recentre=1;}
-        if(stick_chord){if(!held[SRC_LS]&&!held[SRC_RS])stick_chord=0;held[SRC_LS]=held[SRC_RS]=0;}
-    }else stick_spray=stick_chord=0;
-    stick_shake=0;
-    if(stick_spray){stick_shake=held[SRC_A];if(held[SRC_RB]&&!stick_rb_was)stick_recentre=1;stick_rb_was=held[SRC_RB];
-        held[SRC_A]=held[SRC_RB]=0;stick_aim[0]=sx;stick_aim[1]=sy;out->rx=out->ry=128;}
+    const double now=(double)out->timestamp/1e6;
+    if(spray_option){
+        const int both=held[SRC_LS]&&held[SRC_RS];
+        if(both&&!stick_chord){stick_chord=1;chord_started=now;chord_in_can=stick_spray;can_used=now;
+            if(!gyro&&!stick_spray){stick_spray=1;stick_recentre=1;can_sprayed=0;can_walk_from=-1;can_turn_from=now;can_shake_until=now+CAN_TURN_S+CAN_SHAKE_S;}
+            else{can_shake_until=now+CAN_SHAKE_S;can_pulse=1;}}
+        if(stick_chord){
+            if(both&&chord_in_can&&stick_spray&&!chord_exit&&now-chord_started>=CAN_EXIT_HOLD_S){stick_spray=0;chord_exit=1;can_shake_until=-1;}
+            if(!held[SRC_LS]&&!held[SRC_RS])stick_chord=chord_exit=0;
+            held[SRC_LS]=held[SRC_RS]=0;}
+    }else stick_spray=stick_chord=0,can_shake_until=-1;
+    if(gyro)stick_spray=0;
+    if(stick_spray&&held[SRC_B]&&!stick_b_was){stick_spray=0;can_shake_until=-1;}
+    stick_b_was=held[SRC_B];
+    if(stick_spray&&(held[SRC_RT]||rt>30)){can_used=now;can_sprayed=1;}
+    if(stick_spray){const float lx=((float)out->lx-128)/127.f,ly=((float)out->ly-128)/127.f;
+        if(lx*lx+ly*ly>.25f){if(can_walk_from<0)can_walk_from=now;}else can_walk_from=-1;
+        if((can_walk_from>=0&&now-can_walk_from>=CAN_WALK_S)||now-can_used>(can_sprayed?CAN_DONE_S:CAN_UNUSED_S)){
+            stick_spray=0;can_shake_until=-1;can_walk_from=-1;}}
+    // The shake follows the turn on its side.
+    stick_shake=now<can_shake_until&&!(stick_spray&&now<can_turn_from+CAN_TURN_S);
+    can_gyro_shake=gyro&&stick_shake;
+    if(stick_spray){stick_aim[0]=sx;stick_aim[1]=sy;out->rx=out->ry=128;}
     int touch_held=0;
-    for(int i=0;i<SRC_COUNT;++i)if(held[i]&&map[i]>=T_TOUCH&&map[i]<=T_TOUCH_RIGHT)touch_held=1;
+    for(int i=0;i<SRC_COUNT;++i)if(held[i]&&map[i]>=T_TOUCH&&map[i]<=T_TOUCH_BOTH)touch_held=1;
+    // A touchpad button held with D-pad left / right: that side only (touch_both).
+    int touch_side=0;
+    if(touch_held){if(held[SRC_LEFT]){touch_side=-1;held[SRC_LEFT]=0;}else if(held[SRC_RIGHT]){touch_side=1;held[SRC_RIGHT]=0;}}
+    if(core_option<0){core_option=option_on("ISS_PAD_CORE_HOLD");core_turbo=option_on("ISS_PAD_CORE_TURBO");}
+    // The core hold lets go (it was latched with View still held: only a new press counts).
+    if(core_hold){const int ab=held[SRC_A]||held[SRC_B];
+        if(ab&&!core_ab_was)core_release("A or B");
+        else if(touch_held&&!core_touch_was){core_release("View");swipe_latched=1;}
+        else if(stick_spray)core_release("spray can");
+        else{const float lx=((float)out->lx-128)/127.f,ly=((float)out->ly-128)/127.f;
+            if(lx*lx+ly*ly>.25f){if(core_walk_from<0)core_walk_from=now;else if(now-core_walk_from>=CORE_WALK_S)core_release("walked");}
+            else core_walk_from=-1;}}
+    core_touch_was=touch_held;core_ab_was=held[SRC_A]||held[SRC_B];
     if(swipe_option&&touch_held&&!stick_spray){const float ax=fabsf(sx),ay=fabsf(sy),m=ax>ay?ax:ay;
-        if(swipe_armed&&m>.6f){pad_swipe=ay>=ax?(sy<0?0:1):(sx<0?2:3);swipe_armed=0;swipe_latched=1;}
-        if(m<.3f)swipe_armed=1;
+        if(swipe_armed&&m>.6f){pad_swipe=ay>=ax?(sy<0?0:1):(sx<0?2:3);swipe_armed=0;swipe_latched=1;
+            core_flick_from=pad_swipe==0&&!core_hold?now:-1;}
+        if(m<.3f){swipe_armed=1;core_flick_from=-1;}
+        // Still pushed up when the stroke is nearly over: the core hold.
+        if(core_option&&core_flick_from>=0&&sy<-.6f&&now-core_flick_from>=CORE_LATCH_S){
+            core_hold=1;core_flick_from=-1;core_used=now;core_pressed=0;core_walk_from=-1;core_r2_was=0;core_pulse=1;
+            fprintf(stderr,"PAD_CORE hold on\n");}
         out->rx=out->ry=128;
-    }else{swipe_armed=1;if(!touch_held)swipe_latched=0;}
+    }else{swipe_armed=1;core_flick_from=-1;if(!touch_held)swipe_latched=0;}
     for(int i=0;i<SRC_COUNT;++i){const int t=map[i],down=held[i];
         if(down&&!source_was[i]&&t>=T_SWIPE_UP)pad_swipe=t-T_SWIPE_UP;
         source_was[i]=down;
         const uint8_t amount=i==SRC_LT?lt:i==SRC_RT?rt:(down?255:0);
         if(t==T_L2&&amount>out->l2)out->l2=amount;
         if(t==T_R2&&amount>out->r2)out->r2=amount;
-        if(!down||(swipe_latched&&t>=T_TOUCH&&t<=T_TOUCH_RIGHT))continue;
+        if(!down||(swipe_latched&&t>=T_TOUCH&&t<=T_TOUCH_BOTH))continue;
         out->buttons|=targets[t].bit;
         if(t==T_TOUCH){contacts[0]=1;xy[0][0]=960;xy[0][1]=471;}
         if(t==T_TOUCH_LEFT){contacts[0]=1;xy[0][0]=480;xy[0][1]=471;}
         if(t==T_TOUCH_RIGHT){contacts[1]=1;xy[1][0]=1440;xy[1][1]=471;}
+        if(t==T_TOUCH_BOTH){if(touch_side<=0){contacts[0]=1;xy[0][0]=480;xy[0][1]=471;}
+            if(touch_side>=0){contacts[1]=1;xy[1][0]=1440;xy[1][1]=471;}}
     }
 }
 // The spray can is shaken harder than 2 G, which a DualShock 4 (+-4 G) measures and Valve's
@@ -400,9 +473,9 @@ static void refresh_cursor(HWND window){
 static void show_mode(HWND window){
     if(!window||(!base_title[0]&&!InternalGetWindowText(window,base_title,256)))return;
     wchar_t title[320];
-    swprintf(title,320,L"%ls%ls",base_title,mouse_mode==1?L"  [touchpad: mouse]":
+    swprintf(title,320,L"%ls%ls%ls",base_title,mouse_mode==1?L"  [touchpad: mouse]":
              mouse_mode==2?(stick_spray?L"  [spray: mouse and right stick]":L"  [spray: mouse]"):
-             stick_spray?L"  [spray: right stick]":L"");
+             stick_spray?L"  [spray: right stick]":L"",core_hold?L"  [touchpad: held up - press or hold R2]":L"");
     SendMessageTimeoutW(window,WM_SETTEXT,0,(LPARAM)title,SMTO_ABORTIFHUNG,50,NULL);
 }
 static void set_mouse_mode(int mode,HWND window){
@@ -540,11 +613,18 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
     if(stick_spray!=stick_shown){stick_shown=stick_spray;fprintf(stderr,"PAD_STICK spray %s\n",stick_spray?"on":"off");
         if(stick_spray!=(mouse_mode==2))set_mouse_mode(stick_spray?2:0,game_window);else show_mode(game_window);
         if(sdl)request_rumble(0x6000,0x6000,stick_spray?250:100,1);}
+    if(can_pulse){can_pulse=0;if(sdl)request_rumble(0x3000,0x3000,(Uint32)(CAN_SHAKE_S*1000),1);}
+    // The core hold (apply_map): ends with the controller unplugged or after it went unused.
+    if(core_hold){if(!sdl&&!xinput)core_release("controller gone");
+        else if(cmd_now-core_used>(core_pressed?CORE_DONE_S:CORE_UNUSED_S))core_release("R2 unused");}
+    if(core_pulse){if(sdl)request_rumble(core_pulse>0?0x5000:0x2000,core_pulse>0?0x5000:0x2000,core_pulse>0?180:80,1);core_pulse=0;}
+    if(core_hold!=core_shown){core_shown=core_hold;show_mode(game_window);}
     float stick_turn[2]={0,0},stick_dt=0;
     if(stick_spray){
         if(stick_recentre){stick_recentre=0;memcpy(spray,spray_pose,sizeof(spray));stick_tick=0;}
         stick_dt=stick_tick?(float)(out->timestamp-stick_tick)/1e6f:0;stick_tick=out->timestamp;if(stick_dt>0.1f)stick_dt=0.1f;
-        for(int i=0;i<2;++i){const float a=fabsf(stick_aim[i]),v=a>.12f?(a-.12f)/.88f:0;stick_turn[i]=(stick_aim[i]<0?-v*v:v*v)*400*stick_speed*stick_dt;}
+        const int turning=(double)out->timestamp/1e6<can_turn_from+CAN_TURN_S;
+        for(int i=0;i<2;++i){const float a=fabsf(stick_aim[i]),v=a>.12f&&!turning?(a-.12f)/.88f:0;stick_turn[i]=(stick_aim[i]<0?-v*v:v*v)*400*stick_speed*stick_dt;}
     }
     if(mouse_mode==2&&cmd_now<cmd_aim_until){mouse_dx+=cmd_aim_dx;mouse_dy+=cmd_aim_dy;}
     if(mouse_mode==2){
@@ -561,17 +641,37 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         pad_spray_step(spray,stick_turn[0],stick_turn[1],stick_dt,stick_shake,(double)out->timestamp/1e6,out->angular,out->acceleration);
         memcpy(out->orientation,spray,sizeof(spray));
     }
+    // The can's turn on its side (L3 + R3, no gyro): upright to the can's pose about the
+    // controller's Z axis in CAN_TURN_S, with the gyro's rate; aiming waits for it.
+    {static int turn_final=1;const double turn=((double)out->timestamp/1e6-can_turn_from)/CAN_TURN_S;
+        if(stick_spray&&turn>=0&&turn<1){const float e=(float)(turn*turn*(3-2*turn)),half=.78539816f*e; // smoothstep, 0..pi/4
+            const float q[4]={0,0,sinf(half),cosf(half)},conj[4]={-q[0],-q[1],-q[2],q[3]},up[3]={0,1,0};
+            memcpy(spray,q,sizeof(spray));memcpy(out->orientation,q,sizeof(q));quat_rotate(conj,up,out->acceleration);
+            const float rate=(float)(1.5707963*6*turn*(1-turn)/CAN_TURN_S); // d(angle)/dt of the smoothstep
+            out->angular[0]=out->angular[1]=0;out->angular[2]=rate;turn_final=0;}
+        else if(stick_spray&&can_turn_from>=0&&turn>=1&&!turn_final){turn_final=1;memcpy(spray,spray_pose,sizeof(spray));}}
+    // A controller with a gyro: the chord's shake on top of its own motion (the F7 mode shakes in
+    // pad_spray_step).
+    if(can_gyro_shake&&mouse_mode!=2){const float phase=(float)(6.283185307*6.0*((double)out->timestamp/1e6));
+        out->acceleration[0]+=1.6f*sinf(phase);out->angular[2]+=4.0f*cosf(phase);}
 
     // ISS_PAD_REAL=0 (scripted runs): the real controller and keyboard are ignored, only the pad
     // script drives the game (a hand on the controller changed the route of A/B runs).
     static int real_pad=-1;if(real_pad<0){const char *s=getenv("ISS_PAD_REAL");real_pad=!s||s[0]!='0';}
-    if(!real_pad){out->buttons=0;out->lx=out->ly=out->rx=out->ry=128;out->l2=out->r2=0;contacts[0]=contacts[1]=0;swipe_direction=-1;}
-    if(swipe_direction>=0){float t=(float)(out->timestamp-swipe_started)/450000.0f;out->buttons&=~UINT32_C(0x100000);
+    if(!real_pad){out->buttons=0;out->lx=out->ly=out->rx=out->ry=128;out->l2=out->r2=0;contacts[0]=contacts[1]=0;swipe_direction=-1;core_release("ISS_PAD_REAL=0");}
+    // The keyboard's swipe up (1) held past the stroke holds the finger at the top too.
+    const int key_core=focused&&swipe_direction==0&&swipe_keys[0]&&out->timestamp-swipe_started>=450000;
+    if(swipe_direction>=0&&!key_core){float t=(float)(out->timestamp-swipe_started)/450000.0f;out->buttons&=~UINT32_C(0x100000);
         if(t>=1){swipe_direction=-1;contacts[0]=contacts[1]=0;}else{
             float x=.5f,y=.5f;if(swipe_direction==0)y=.85f-.7f*t;if(swipe_direction==1)y=.15f+.7f*t;
             if(swipe_direction==2)x=.85f-.7f*t;if(swipe_direction==3)x=.15f+.7f*t;
             contacts[0]=1;contacts[1]=0;xy[0][0]=touch_coord(x,1919);xy[0][1]=touch_coord(y,941);out->buttons&=~UINT32_C(0x100000);}
     }
+    // The core hold: once the stroke is over the finger rests where it ended, the same contact
+    // (was_touch stays set, so its id does not change), with no click.
+    const int core_active=(core_hold&&swipe_direction<0)||key_core;
+    if(core_active){contacts[0]=1;contacts[1]=0;xy[0][0]=touch_coord(.5f,1919);xy[0][1]=touch_coord(CORE_Y,941);
+        out->buttons&=~UINT32_C(0x100000);}
     // ISS_PAD_SCRIPT=run (benchmarks): after ISS_PAD_SCRIPT_DELAY seconds of process time the
     // character runs forward, turning the camera for 2 s of every 12 and jumping every 3 s, so a
     // run measures the city while moving (streaming, changing shadow cascades) repeatably.
@@ -639,6 +739,13 @@ static int32_t GUEST_ABI pad_read(int handle,PadData *out){
         if(seq[i].mask==0x100000&&!contacts[0]&&!contacts[1]){contacts[0]=1;xy[0][0]=960;xy[0][1]=471;}
         if(!seq[i].logged){seq[i].logged=1;fprintf(stderr,"PAD_SEQ %s at %.2f s\n",seq[i].name,t);}}
     if((double)out->timestamp/1e6<cmd_paint_until)out->r2=255;
+    // R2 while the core is held: every press counts as used; held, it is pressed again and again
+    // (down for the first half of each period, from the moment it went down; a tap passes as it is).
+    if(core_hold||key_core){const double t=(double)out->timestamp/1e6;const int r2=out->r2>30;
+        if(r2&&!core_r2_was)core_r2_from=t;
+        if(r2){core_used=t;core_pressed=1;
+            if(core_turbo&&fmod((t-core_r2_from)*CORE_TURBO_HZ,1.0)>=.5)out->r2=0;}
+        core_r2_was=r2;}else core_r2_was=0;
     if(out->l2>30)out->buttons|=0x100;if(out->r2>30)out->buttons|=0x200;
     if((contacts[0]||contacts[1])&&!was_touch[0]&&!was_touch[1])touch_start=out->timestamp;
     for(unsigned i=0;i<2;++i){if(contacts[i]){
