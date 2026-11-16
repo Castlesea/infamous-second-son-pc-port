@@ -151,11 +151,12 @@ struct Game {
     const wchar_t* subtitle;  // the title in type, under "inFAMOUS"
     const char* user_dir;     // under user\ ("" for user\ itself)
     bool second_son_art;      // the release's shaders, logo and crow icon are Second Son's
+    bool render_patches;      // native/ultrawide.cpp patches its eboot (render size, FOV)
 };
 const Game kGames[] = {
-    {"second-son", L"inFAMOUS Second Son", "inFAMOUS Second Son", "CUSA00004", L"SECOND SON", "", true},
+    {"second-son", L"inFAMOUS Second Son", "inFAMOUS Second Son", "CUSA00004", L"SECOND SON", "", true, true},
     {"first-light", L"inFAMOUS First Light", "inFAMOUS First Light", "CUSA00897", L"FIRST LIGHT",
-     "first-light", false},
+     "first-light", false, false},
 };
 const Game* g_game_info = &kGames[0];
 
@@ -944,6 +945,14 @@ std::wstring LaunchGame(HWND notify) {
     env[L"ISS_DLSS_UPSCALE"] = upscaling == "dlss" && !native ? L"1" : L"0";
     env[L"ISS_RESOLUTION"] = Widen(RenderResolutionValue());
     env[L"ISS_FOV"] = Widen(SettingValue("fov"));
+    // The render size and FOV patches (native/ultrawide.cpp) match Second Son's eboot only: with
+    // any other size First Light stopped at start ("ULTRAWIDE rejected: eboot function identity
+    // mismatch"). It renders at the game's own 1920x1080; FSR 1 still scales it to the window.
+    if (!g_game_info->render_patches) {
+        env[L"ISS_RESOLUTION"] = L"1920x1080";
+        env[L"ISS_FOV"] = L"100";
+        env[L"ISS_DLSS_UPSCALE"] = L"0";
+    }
     env[L"ISS_HUD_ASPECT"] = Widen(SettingValue("hud_width"));
     env[L"ISS_ASYNC_SKIP_DRAWS"] = Widen(SettingValue("shader_mode"));
     env[L"ISS_GPU_BLACKBOX"] = Widen(SettingValue("blackbox"));
