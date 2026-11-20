@@ -88,53 +88,111 @@ int main(int argc,char **argv){
     CHECK(data[52]==0&&!(buttons&0x100000)&&(buttons&8));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_START,false));CHECK(read(1,data)==0);CHECK(data[52]==0);
     SDL_CloseJoystick(joystick);CHECK(SDL_DetachVirtualJoystick(id));CHECK(read(1,data)==0);CHECK(data[52]==0&&scalar(data,48)==0);
-    // A controller without a touchpad (Xbox) gets the layout: View / Menu press the left / right
-    // side of the touchpad (recommended), Guide is Options here (ISS_PAD_MAP, set before init).
+    // A controller without a touchpad (Xbox) gets the layout: View presses the touchpad on both
+    // sides, Menu is Options (recommended); View + D-pad left / right presses that side only. Guide
+    // is Options here too (ISS_PAD_MAP, set before init).
     SDL_VirtualJoystickDesc xbox;SDL_INIT_INTERFACE(&xbox);xbox.type=SDL_JOYSTICK_TYPE_GAMEPAD;
     xbox.naxes=6;xbox.nbuttons=16;xbox.axis_mask=63;xbox.button_mask=65535;xbox.name="Xbox layout fixture";
     xbox.vendor_id=0x045e;xbox.product_id=0x02ff;
     id=SDL_AttachVirtualJoystick(&xbox);CHECK(id);joystick=SDL_OpenJoystick(id);CHECK(joystick);
     SDL_Delay(1100);CHECK(read(1,data)==0); // the next scan (once a second) picks it
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
-    CHECK(data[52]==1&&(buttons&0x100000)&&!(buttons&8));memcpy(&x,data+60,2);CHECK(x==480);
+    CHECK(data[52]==2&&(buttons&0x100000)&&!(buttons&8));memcpy(&x,data+60,2);CHECK(x==480);CHECK(data[64]!=data[72]);
+    memcpy(&x,data+68,2);CHECK(x==1440);
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_RIGHT,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    memcpy(&x,data+60,2);CHECK(data[52]==1&&x==1440&&(buttons&0x100000)&&!(buttons&0x20));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_RIGHT,false));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_LEFT,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    memcpy(&x,data+60,2);CHECK(data[52]==1&&x==480&&!(buttons&0x80));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_LEFT,false));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_START,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
-    CHECK(data[52]==2&&(buttons&0x100000)&&!(buttons&8));CHECK(data[64]!=data[72]);
-    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_START,false));
+    CHECK(data[52]==2&&(buttons&0x100000)&&(buttons&8));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    CHECK(data[52]==0&&(buttons&8)&&!(buttons&0x100000));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_START,false));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_GUIDE,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
     CHECK(data[52]==0&&(buttons&8)&&!(buttons&0x10000));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_GUIDE,false));
     // View held and the right stick pushed up: a swipe up from the bottom (no click, the camera
     // still); once it ends, View's own touch stays let go until View is released.
-    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));CHECK(read(1,data)==0);CHECK(data[52]==1);
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));CHECK(read(1,data)==0);CHECK(data[52]==2);
     CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-32768));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
     memcpy(&y,data+62,2);CHECK(data[52]==1&&y>600&&!(buttons&0x100000)&&data[6]==128&&data[7]==128);
+    // A flick (the stick back before the stroke is over) is a plain swipe: the finger lifts.
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0));CHECK(read(1,data)==0);
     SDL_Delay(500);CHECK(read(1,data)==0);CHECK(data[52]==0);
-    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0));CHECK(read(1,data)==0);CHECK(data[52]==0);
+    CHECK(read(1,data)==0);CHECK(data[52]==0);
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(read(1,data)==0);
-    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));CHECK(read(1,data)==0);CHECK(data[52]==1);
-    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));
-    // L3 + R3 (no gyro): the spray can on the right stick, held on its side, with the mouse's spray
-    // mode; the presses and the stick stay with the can, A (cross) shakes it. L3 + R3 again ends it.
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));CHECK(read(1,data)==0);CHECK(data[52]==2);
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(read(1,data)==0);
+    // The core hold: the stick kept up past the stroke latches the finger at the top, the same
+    // contact, after View and the stick are let go; R2 held is pressed again and again; B lets go.
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-32768));CHECK(read(1,data)==0);
+    CHECK(data[52]==1);const unsigned char stroke=data[64];
+    SDL_Delay(450);CHECK(read(1,data)==0);SDL_Delay(100);CHECK(read(1,data)==0);memcpy(&buttons,data,4);memcpy(&y,data+62,2);
+    CHECK(data[52]==1&&data[64]==stroke&&y<200&&!(buttons&0x100000));
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(read(1,data)==0);
+    memcpy(&y,data+62,2);CHECK(data[52]==1&&data[64]==stroke&&y<200);
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767));
+    int r2_on=0,r2_off=0,r2_edges=0,r2_last=0;
+    for(int i=0;i<40;++i){SDL_Delay(10);CHECK(read(1,data)==0);memcpy(&buttons,data,4);const int r2=(buttons&0x200)!=0;
+        if(r2)++r2_on;else ++r2_off;if(r2&&!r2_last)++r2_edges;r2_last=r2;CHECK(data[52]==1&&data[64]==stroke);}
+    CHECK(r2_on>5&&r2_off>5&&r2_edges>=2);
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,0));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    CHECK((buttons&0x2000)&&data[52]==0);
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,false));CHECK(read(1,data)==0);CHECK(data[52]==0);
+    // A new View press lets go too, without a tap.
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-32768));CHECK(read(1,data)==0);
+    SDL_Delay(450);CHECK(read(1,data)==0);SDL_Delay(100);
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(read(1,data)==0);CHECK(data[52]==1);
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    CHECK(data[52]==0&&!(buttons&0x100000));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));CHECK(read(1,data)==0);
+    // L3 + R3 (no gyro): the can gesture. The presses are not passed on; the controller turns on
+    // its side (still upright right after the press), then shakes (the can's long axis, above 1.5 G),
+    // then rests on its side; the right stick turns the can, A stays Cross (it no longer shakes).
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_STICK,true));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
-    CHECK(!(buttons&6)&&fabsf(scalar(data,28)-1)<.01f);const float side=scalar(data,20);
+    CHECK(!(buttons&6)&&scalar(data,32)>.9f);
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_STICK,false));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,false));
+    float peak=0;for(int i=0;i<60;++i){SDL_Delay(10);CHECK(read(1,data)==0);if(scalar(data,28)>peak)peak=scalar(data,28);}
+    CHECK(peak>1.5f);
+    SDL_Delay(1300);CHECK(read(1,data)==0);CHECK(fabsf(scalar(data,28)-1)<.01f);const float side=scalar(data,20);
     CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,32767));CHECK(read(1,data)==0);
     SDL_Delay(50);CHECK(read(1,data)==0);CHECK(data[6]==128&&scalar(data,40)<-.5f&&scalar(data,20)!=side);
     CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0));
-    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
-    float peak=0;for(int i=0;i<12;++i){SDL_Delay(8);CHECK(read(1,data)==0);memcpy(&buttons,data,4);CHECK(!(buttons&0x4000));
-        if(scalar(data,28)>peak)peak=scalar(data,28);}
-    CHECK(peak>1.5f);CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    CHECK(buttons&0x4000);CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    // L3 + R3 again: shaken again, the can stays.
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_STICK,true));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,true));CHECK(read(1,data)==0);
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_STICK,false));
     CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,false));
+    peak=0;for(int i=0;i<12;++i){SDL_Delay(8);CHECK(read(1,data)==0);if(scalar(data,28)>peak)peak=scalar(data,28);}
+    CHECK(peak>1.5f);
+    // B (Circle) ends it and reaches the game: the stick is the camera again, the pad upright.
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,true));CHECK(read(1,data)==0);memcpy(&buttons,data,4);
+    CHECK(buttons&0x2000);CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,false));
     CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,32767));CHECK(read(1,data)==0);
     CHECK(data[6]==255&&fabsf(scalar(data,24)-1)<.001f);
+    // Walking Delsin (left stick past half for 0.5 s) ends it too: the graffiti is over.
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_STICK,true));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,true));CHECK(read(1,data)==0);
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_STICK,false));
+    CHECK(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,false));
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,32767));CHECK(read(1,data)==0);CHECK(data[6]==128);
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTY,-32768));CHECK(read(1,data)==0);
+    SDL_Delay(600);CHECK(read(1,data)==0);CHECK(read(1,data)==0);CHECK(data[6]==255);
+    CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTY,0));CHECK(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0));
     SDL_CloseJoystick(joystick);CHECK(SDL_DetachVirtualJoystick(id));
     spray_test();accel_gain_test();cursor_test();
-    puts("PASS: SDL DS4 buttons, axes, two independent touch contacts, release, sensors, quaternion, disconnect, PlayStation and Xbox layouts, the F7 spray can, the accelerometer gain, the right stick swipes and spray can., and the cursor waking only for real mouse or key use.");
+    puts("PASS: SDL DS4 buttons, axes, two independent touch contacts, release, sensors, quaternion, disconnect, PlayStation and Xbox layouts, the F7 spray can, the accelerometer gain, the right stick swipes, the core hold (latched swipe up, R2 turbo, B and View let go), View on both touchpad sides and one side with the D-pad, Menu as Options, the L3 + R3 can gesture (ends on B and on walking), and the cursor waking only for real mouse or key use.");
     return 0;
 }
